@@ -8,7 +8,6 @@ import re
 import json
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
@@ -18,13 +17,9 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
-# OpenAI client
 client = openai.OpenAI(api_key=api_key)
+model = whisper.load_model("medium")  # You can switch to "small" for faster response
 
-# Load Whisper model
-model = whisper.load_model("medium")
-
-# FastAPI app
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -35,29 +30,6 @@ app.add_middleware(
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
-# GPT translation
-def translate_with_gpt(text, source_lang, target_lang):
-    prompt = (
-        f"You are a translator. Translate the following sentence from {source_lang} to {target_lang}. "
-        f"Do not explain or interpret. Return only the translated sentence.\n\n"
-        f"Sentence: {text}"
-    )
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a precise, literal translator."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=150
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print("❌ GPT translation error:", e)
-        return "[Translation error]"
-
-# Sentence completeness check
 def is_complete_sentence(text, lang):
     text = text.strip()
     if lang == "Japanese":
@@ -69,6 +41,38 @@ def is_complete_sentence(text, lang):
     else:
         return bool(re.search(r"[.!?]$", text))
 
+async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
+    prompt = (
+        f"You are a translator. Translate the following sentence from {source_lang} to {target_lang}. "
+        f"Do not explain or interpret. Return only the translated sentence.\n\n"
+        f"Sentence: {text}"
+    )
+
+    try:
+        stream = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are a precise, literal translator."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=150,
+            stream=True
+        )
+
+        full = ""
+        async for chunk in stream:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                full += delta
+                await websocket.send_text(f"[STREAM]{full}")
+
+        await websocket.send_text(f"[DONE]{full}")
+
+    except Exception as e:
+        print("❌ GPT streaming error:", e)
+        await websocket.send_text("[Translation error]")
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -77,7 +81,6 @@ async def websocket_endpoint(websocket: WebSocket):
     target_lang = None
 
     try:
-        # Receive initial settings
         settings = await websocket.receive_text()
         try:
             config = json.loads(settings)
@@ -90,14 +93,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text("[Invalid translation direction]")
                 await websocket.close()
                 return
+            print(f"🔄 Direction set: {source_lang} → {target_lang}")
+            await websocket.send_text(f"[Ready to translate from {source_lang} to {target_lang}]")
         except json.JSONDecodeError:
             await websocket.send_text("[Failed to parse translation settings]")
             await websocket.close()
             return
 
         while True:
-            print("🟡 Waiting for audio chunk...")
-            audio_bytes = await websocket.receive_bytes()
+            message = await websocket.receive()
+            if "bytes" not in message:
+                continue
+
+            audio_bytes = message["bytes"]
             print(f"🟢 Received chunk: {len(audio_bytes)} bytes")
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as input_file:
@@ -113,12 +121,20 @@ async def websocket_endpoint(websocket: WebSocket):
                             check=True
                         )
 
-                        response = model.transcribe(output_wav.name, fp16=True)
+                        # Transcribe using Whisper
+                        response = model.transcribe(output_wav.name, fp16=True, word_timestamps=False)
+
+                        # Filter out silence or noise
+                        no_speech_prob = response.get("no_speech_prob", 0)
+                        if no_speech_prob > 0.6:
+                            print(f"🧘 Skipping likely silence (no_speech_prob = {no_speech_prob:.2f})")
+                            continue
+
                         chunk_text = response["text"].strip()
                         print(f"📝 Transcript: '{chunk_text}'")
 
                         if not chunk_text:
-                            print("⚠️ Skipping short/empty chunk")
+                            print("⚠️ Skipping empty chunk")
                             continue
 
                         sentence_buffer += " " + chunk_text
@@ -126,9 +142,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         if is_complete_sentence(sentence_buffer, source_lang):
                             print(f"✅ Sentence complete: {sentence_buffer}")
-                            translated = translate_with_gpt(sentence_buffer, source_lang, target_lang)
-                            print("🌍 Translated:", translated)
-                            await websocket.send_text(translated)
+                            await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
                             sentence_buffer = ""
                         else:
                             print("⏳ Waiting for sentence to complete...")
