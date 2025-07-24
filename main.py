@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, json
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -8,13 +8,15 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-model = whisper.load_model("large-v3")
+model = whisper.load_model("medium")
 
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+transcript_history = []  # [(segment_id, original_text)]
 
 @app.get("/")
 async def serve_index():
@@ -54,7 +56,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         settings = await websocket.receive_text()
-        print("📥 Received config:", settings)
         config = json.loads(settings)
         direction = config.get("direction")
         if direction == "en-ja":
@@ -83,7 +84,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         subprocess.run([
                             "ffmpeg", "-y",
                             "-i", raw.name,
-                            "-af", "silenceremove=1:0:-50dB",  # Trim silence
+                            "-af", "silenceremove=1:0:-50dB",
                             "-ar", "16000",
                             "-ac", "1",
                             wav.name
@@ -92,21 +93,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         stderr=subprocess.PIPE,
                         check=True
                         )
-
-                        # skip short audio (< 0.5s)
-                        probe = subprocess.run(
-                            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                             "-of", "default=noprint_wrappers=1:nokey=1", wav.name],
-                            capture_output=True, text=True
-                        )
-                        duration = float(probe.stdout.strip())
-                        if duration < 0.5:
-                            print("⏭️ Skipping short audio chunk")
-                            continue
-
-                    except subprocess.CalledProcessError as e:
-                        print("❌ FFmpeg error: could not convert audio chunk")
-                        print("🔎 FFmpeg stderr:", e.stderr.decode())
+                    except:
                         continue
 
                     result = model.transcribe(
@@ -127,7 +114,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # Filter known hallucinated phrases
+                    # skip generic thank-you/subscribe phrases (hardcoded filter)
                     text_lower = text.lower()
                     if (
                         "thank you" in text_lower
@@ -139,53 +126,53 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
 
-                    # optional GPT filter
+                    # optional GPT hallucination filter
                     if await hallucination_check(text):
                         print("🧠 GPT flagged as hallucination:", text)
                         continue
 
-                    await stream_translate_with_gpt(websocket, text, source_lang, target_lang)
+                    # store and translate
+                    segment_id = str(uuid.uuid4())
+                    transcript_history.append((segment_id, text))
+
+                    translated = await translate_text(text, source_lang, target_lang)
+                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
+
+                    # context-aware update for previous segment
+                    if len(transcript_history) >= 2:
+                        context_segs = transcript_history[-2:]
+                        context_text = " ".join(s[1] for s in context_segs)
+                        improved = await translate_text(context_text, source_lang, target_lang)
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': context_segs[0][0], 'text': improved})}")
 
     except Exception as e:
         print("❌ WebSocket error:", str(e))
         await websocket.close()
 
-async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
-    try:
-        prompt = (
-            f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
-            f"Rules:\n"
-            f"- Return only the translated sentence. No commentary, no meta info.\n"
-            f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
-            f"- No thank yous, greetings, or filler.\n\n"
-            f"Sentence: {text}"
-        )
+async def translate_text(text, source_lang, target_lang):
+    prompt = (
+        f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
+        f"Rules:\n"
+        f"- Return only the translated sentence. No commentary, no meta info.\n"
+        f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
+        f"- No thank yous, greetings, or filler.\n\n"
+        f"Sentence: {text}"
+    )
 
-        stream = await client.chat.completions.create(
+    try:
+        response = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a strict and literal translator."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=150,
-            stream=True
+            max_tokens=150
         )
-
-        full = ""
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                full += delta
-                await websocket.send_text(f"[STREAM]{full}")
-        await websocket.send_text(f"[DONE]{full}")
-
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print("❌ Translation error:", e)
-        try:
-            await websocket.send_text("[DONE]")
-        except:
-            pass
+        return text
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

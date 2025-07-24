@@ -13,7 +13,7 @@
 </head>
 <body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-start p-6 space-y-10">
 
-  <h1 class="text-5xl font-bold tracking-tight text-center">Socious Translator</h1>
+  <h1 class="text-3xl font-bold tracking-tight text-center">Socious Translator</h1>
 
   <!-- 🔝 Top Control Section -->
   <div class="w-full max-w-3xl bg-[#1A1A1C] rounded-2xl p-6 shadow-lg flex flex-col items-center space-y-6">
@@ -51,6 +51,8 @@
     let recording = false;
     let activeLine = null;
 
+    const segmentMap = new Map(); // id => div
+
     directionSelect.onchange = () => stopRecording();
 
     async function startRecording() {
@@ -72,14 +74,6 @@
         socket.onmessage = (event) => {
           const data = event.data;
 
-          let paragraphDiv = output.querySelector(".paragraph");
-          if (!paragraphDiv) {
-            paragraphDiv = document.createElement("div");
-            paragraphDiv.className = "paragraph text-white";
-            paragraphDiv.dataset.final = "true";
-            output.appendChild(paragraphDiv);
-          }
-
           if (data.startsWith("[STREAM]")) {
             const text = data.replace("[STREAM]", "");
             if (!activeLine) {
@@ -91,25 +85,27 @@
               activeLine.textContent = text + " ▌";
             });
           } else if (data.startsWith("[DONE]")) {
-            const finalText = data.replace("[DONE]", "").trim();
-            if (finalText && paragraphDiv) {
-              requestAnimationFrame(() => {
-                paragraphDiv.textContent += (paragraphDiv.textContent.endsWith(" ") ? "" : " ") + finalText;
+            const payload = JSON.parse(data.replace("[DONE]", ""));
+            const { id, text } = payload;
 
-                const maxChars = 350;
-                if (paragraphDiv.textContent.length > maxChars) {
-                  const words = paragraphDiv.textContent.trim().split(" ");
-                  while (paragraphDiv.textContent.length > maxChars && words.length > 1) {
-                    words.shift();
-                    paragraphDiv.textContent = words.join(" ");
-                  }
-                }
+            const segmentDiv = document.createElement("div");
+            segmentDiv.className = "paragraph text-white";
+            segmentDiv.id = `segment-${id}`;
+            segmentDiv.textContent = text;
+            output.appendChild(segmentDiv);
+            segmentMap.set(id, segmentDiv);
 
-                if (activeLine) {
-                  output.removeChild(activeLine);
-                  activeLine = null;
-                }
-              });
+            if (activeLine) {
+              output.removeChild(activeLine);
+              activeLine = null;
+            }
+          } else if (data.startsWith("[UPDATE]")) {
+            const payload = JSON.parse(data.replace("[UPDATE]", ""));
+            const { id, text } = payload;
+
+            const segmentDiv = segmentMap.get(id);
+            if (segmentDiv) {
+              segmentDiv.textContent = text;
             }
           }
         };
