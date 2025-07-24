@@ -11,23 +11,41 @@
     }
   </style>
 </head>
-<body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
+<body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-start p-6 space-y-10">
+
   <h1 class="text-5xl font-bold tracking-tight text-center">Socious Translator</h1>
 
-  <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-6 flex flex-col items-center">
-    <label class="block text-base font-medium">Translation Direction</label>
-    <select id="direction" class="w-full max-w-md bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none text-center">
-      <option value="en-ja">English → Japanese</option>
-      <option value="ja-en">Japanese → English</option>
-    </select>
+  <!-- 🔝 Top Control Section -->
+  <div class="w-full max-w-3xl bg-[#1A1A1C] rounded-2xl p-6 shadow-lg flex flex-col items-center space-y-6">
+    <div class="w-full flex flex-col lg:flex-row lg:items-end lg:justify-center lg:gap-6 space-y-4 lg:space-y-0">
+      <div class="flex flex-col w-full lg:w-auto items-center">
+        <label for="direction" class="text-base font-medium mb-1">Translation Direction</label>
+        <select id="direction" class="w-full lg:w-64 bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none text-center">
+          <option value="en-ja">English → Japanese</option>
+          <option value="ja-en">Japanese → English</option>
+        </select>
+      </div>
 
-    <div class="flex gap-4 mt-4">
-      <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">Start Recording</button>
-      <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">Stop Recording</button>
+      <div class="flex flex-col sm:flex-row gap-4">
+        <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">Start Recording</button>
+        <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">Stop Recording</button>
+      </div>
     </div>
   </div>
 
-  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-20 shadow-xl text-2xl font-semibold text-center leading-tight tracking-wide min-h-[320px] flex flex-col justify-end space-y-6"></div>
+  <!-- 📝 Input Text Area -->
+  <div class="w-full max-w-4xl flex flex-col space-y-6 items-center">
+    <div class="w-full">
+      <h2 class="text-xl font-semibold mb-2">Input (English)</h2>
+      <div class="bg-[#1A1A1C] rounded-lg p-6 min-h-[160px] shadow-md w-full"></div>
+    </div>
+
+    <!-- 📝 Output Text Area -->
+    <div class="w-full">
+      <h2 class="text-xl font-semibold mb-2">Output (Japanese)</h2>
+      <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-tight tracking-wide min-h-[160px] w-full"></div>
+    </div>
+  </div>
 
   <script>
     const startBtn = document.getElementById("startBtn");
@@ -61,7 +79,6 @@
         socket.onmessage = (event) => {
           const data = event.data;
 
-          // Make sure we have a paragraph block for finalized content
           let paragraphDiv = output.querySelector(".paragraph");
           if (!paragraphDiv) {
             paragraphDiv = document.createElement("div");
@@ -72,36 +89,29 @@
 
           if (data.startsWith("[STREAM]")) {
             const text = data.replace("[STREAM]", "");
-
             if (!activeLine) {
               activeLine = document.createElement("div");
               activeLine.className = "text-gray-300 italic";
               output.appendChild(activeLine);
             }
-
             requestAnimationFrame(() => {
               activeLine.textContent = text + " ▌";
             });
-          }
-
-          else if (data.startsWith("[DONE]")) {
+          } else if (data.startsWith("[DONE]")) {
             const finalText = data.replace("[DONE]", "").trim();
             if (finalText && paragraphDiv) {
               requestAnimationFrame(() => {
-                // Append finalized text to the paragraph
                 paragraphDiv.textContent += (paragraphDiv.textContent.endsWith(" ") ? "" : " ") + finalText;
 
-                // Trim words from start if total exceeds character limit
                 const maxChars = 350;
                 if (paragraphDiv.textContent.length > maxChars) {
                   const words = paragraphDiv.textContent.trim().split(" ");
                   while (paragraphDiv.textContent.length > maxChars && words.length > 1) {
-                    words.shift(); // remove oldest word
+                    words.shift();
                     paragraphDiv.textContent = words.join(" ");
                   }
                 }
 
-                // Clean up the active line
                 if (activeLine) {
                   output.removeChild(activeLine);
                   activeLine = null;
