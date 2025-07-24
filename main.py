@@ -3,7 +3,6 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
-import torch
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -84,7 +83,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         subprocess.run([
                             "ffmpeg", "-y",
                             "-i", raw.name,
-                            "-af", "silenceremove=1:0:-50dB",  # trims silence
+                            "-af", "silenceremove=1:0:-50dB",  # Trim silence
                             "-ar", "16000",
                             "-ac", "1",
                             wav.name
@@ -93,6 +92,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         stderr=subprocess.PIPE,
                         check=True
                         )
+
+                        # skip short audio (< 0.5s)
+                        probe = subprocess.run(
+                            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                             "-of", "default=noprint_wrappers=1:nokey=1", wav.name],
+                            capture_output=True, text=True
+                        )
+                        duration = float(probe.stdout.strip())
+                        if duration < 0.5:
+                            print("⏭️ Skipping short audio chunk")
+                            continue
 
                     except subprocess.CalledProcessError as e:
                         print("❌ FFmpeg error: could not convert audio chunk")
@@ -103,19 +113,35 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
+                        beam_size=5,
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.2,
-                        no_speech_threshold=0.3
+                        no_speech_threshold=0.3,
+                        language="en" if source_lang == "English" else "ja",
+                        compression_ratio_threshold=2.4,
+                        logprob_threshold=-1.0
                     )
-
 
                     text = result["text"].strip()
                     print("📝 Transcribed:", text)
-
                     if not text:
                         continue
 
+                    # Filter known hallucinated phrases
+                    text_lower = text.lower()
+                    if (
+                        "thank you" in text_lower
+                        or "thanks" in text_lower
+                        or "ありがとう" in text
+                        or "ありがとうございます" in text
+                        or "ありがと" in text
+                    ):
+                        print("🚫 Skipping thank-you/ありがとう phrase:", text)
+                        continue
+
+                    # optional GPT filter
                     if await hallucination_check(text):
+                        print("🧠 GPT flagged as hallucination:", text)
                         continue
 
                     await stream_translate_with_gpt(websocket, text, source_lang, target_lang)
