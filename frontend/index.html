@@ -14,7 +14,6 @@
 <body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
   <h1 class="text-5xl font-bold tracking-tight text-center">Socious Translator</h1>
 
-  <!-- Controls -->
   <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-6 flex flex-col items-center">
     <label class="block text-base font-medium">Translation Direction</label>
     <select id="direction" class="w-full max-w-md bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none text-center">
@@ -28,10 +27,7 @@
     </div>
   </div>
 
-  <!-- Display -->
-  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-20 shadow-xl text-6xl font-semibold text-center leading-tight tracking-wide min-h-[320px] flex items-center justify-center">
-    <!-- Translations appear here -->
-  </div>
+  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-20 shadow-xl text-6xl font-semibold text-center leading-tight tracking-wide min-h-[320px] flex items-center justify-center"></div>
 
   <script>
     const startBtn = document.getElementById("startBtn");
@@ -41,64 +37,83 @@
 
     let stream = null;
     let socket = null;
-    let mediaRecorder = null;
-    let recordingActive = false;
+    let recording = false;
     let activeLine = null;
 
     directionSelect.onchange = () => stopRecording();
 
     async function startRecording() {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      socket = new WebSocket("ws://34.69.242.211:8000/ws");
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        socket = new WebSocket("ws://localhost:8000/ws");
 
-      socket.onopen = () => {
-        socket.send(JSON.stringify({ direction: directionSelect.value }));
-        recordingActive = true;
+        socket.onopen = () => {
+          socket.send(JSON.stringify({ direction: directionSelect.value }));
+          recording = true;
+          recordLoop();
 
-        mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+          startBtn.classList.add("opacity-50", "cursor-not-allowed");
+          stopBtn.classList.remove("opacity-50", "cursor-not-allowed");
+        };
 
-        mediaRecorder.ondataavailable = async (e) => {
+        socket.onmessage = (event) => {
+          const data = event.data;
+
+          if (data.startsWith("[STREAM]")) {
+            const text = data.replace("[STREAM]", "");
+            if (!activeLine) {
+              activeLine = document.createElement("div");
+              activeLine.className = "text-gray-300 italic";
+              output.innerHTML = "";
+              output.appendChild(activeLine);
+            }
+            requestAnimationFrame(() => {
+              activeLine.textContent = text + " ▌";
+            });
+          } else if (data.startsWith("[DONE]")) {
+            const finalText = data.replace("[DONE]", "");
+            if (finalText) {
+              requestAnimationFrame(() => {
+                activeLine.textContent = finalText;
+                activeLine.classList.remove("italic", "text-gray-300");
+                activeLine.classList.add("text-white");
+                activeLine = null;
+              });
+            }
+          }
+        };
+      } catch (err) {
+        console.error("Error:", err);
+      }
+    }
+
+    async function recordLoop() {
+      while (recording) {
+        const mimeType = "audio/webm";
+        const recorder = new MediaRecorder(stream, { mimeType });
+
+        recorder.ondataavailable = async (e) => {
           if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
             const buffer = await e.data.arrayBuffer();
             socket.send(buffer);
           }
         };
 
-        mediaRecorder.start(800); // 800ms chunk
-      };
-
-      socket.onmessage = (event) => {
-        const data = event.data;
-        if (data.startsWith("[STREAM]")) {
-          const text = data.replace("[STREAM]", "");
-          if (!activeLine) {
-            activeLine = document.createElement("div");
-            activeLine.className = "text-gray-300 italic";
-            output.innerHTML = "";
-            output.appendChild(activeLine);
-          }
-          activeLine.textContent = text + " ▌";
-        } else if (data.startsWith("[DONE]")) {
-          const finalText = data.replace("[DONE]", "");
-          if (finalText) {
-            activeLine.textContent = finalText;
-            activeLine.classList.remove("italic", "text-gray-300");
-            activeLine.classList.add("text-white");
-            activeLine = null;
-          }
-        }
-      };
-
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-      startBtn.classList.add("opacity-50", "cursor-not-allowed");
-      stopBtn.classList.remove("opacity-50", "cursor-not-allowed");
+        recorder.start();
+        await new Promise((resolve) => {
+          setTimeout(() => {
+            recorder.stop();
+            resolve();
+          }, 1900);
+        });
+      }
     }
 
     function stopRecording() {
-      recordingActive = false;
-      if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-      if (stream) stream.getTracks().forEach(track => track.stop());
+      recording = false;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
       if (socket && socket.readyState === WebSocket.OPEN) socket.close();
 
       startBtn.disabled = false;
@@ -109,7 +124,6 @@
 
     startBtn.onclick = startRecording;
     stopBtn.onclick = stopRecording;
-
   </script>
 </body>
 </html>

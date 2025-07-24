@@ -1,16 +1,15 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, re, json
+import tempfile, subprocess, uvicorn, openai, whisper, os, json
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+import torch
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise ValueError("❌ OPENAI_API_KEY is missing from .env")
-
 client = openai.AsyncOpenAI(api_key=api_key)
-model = whisper.load_model("small")  
+
+model = whisper.load_model("medium")
 
 app = FastAPI()
 app.add_middleware(
@@ -21,13 +20,6 @@ app.add_middleware(
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
-
-def is_complete_sentence(text, lang):
-    text = text.strip()
-    if lang == "Japanese":
-        patterns = [r"です$", r"ます$", r"でした$", r"だ$", r"よ$", r"ね$", r"んです$", r"でしょう$", r"か[。？\?]?$", r"[。！？?!]$"]
-        return any(re.search(p, text) for p in patterns) or len(text.split()) > 6
-    return bool(re.search(r"[.!?]$", text))
 
 async def hallucination_check(text):
     try:
@@ -53,21 +45,22 @@ async def hallucination_check(text):
             max_tokens=1
         )
         return result.choices[0].message.content.strip().upper() == "YES"
-    except Exception:
+    except:
         return False
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    sentence_buffer = ""
-    source_lang = target_lang = None
+    print("🔌 WebSocket connected")
 
     try:
         settings = await websocket.receive_text()
+        print("📥 Received config:", settings)
         config = json.loads(settings)
-        if config.get("direction") == "en-ja":
+        direction = config.get("direction")
+        if direction == "en-ja":
             source_lang, target_lang = "English", "Japanese"
-        elif config.get("direction") == "ja-en":
+        elif direction == "ja-en":
             source_lang, target_lang = "Japanese", "English"
         else:
             await websocket.close()
@@ -79,56 +72,60 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             audio = msg["bytes"]
+            if not audio:
+                continue
+
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
                 raw.write(audio)
                 raw.flush()
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", raw.name, "-ar", "16000", "-ac", "1", wav.name],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-                    )
-        
+                    try:
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", raw.name, "-ar", "16000", "-ac", "1", wav.name],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE,
+                            check=True
+                        )
+                    except subprocess.CalledProcessError as e:
+                        print("❌ FFmpeg error: could not convert audio chunk")
+                        print("🔎 FFmpeg stderr:", e.stderr.decode())
+                        continue
+
                     result = model.transcribe(
                         wav.name,
-                        fp16=False,
-                        vad_filter=True,
-                        vad_parameters={"threshold": 0.5}
+                        fp16=torch.cuda.is_available()
                     )
 
                     if result.get("no_speech_prob", 0) > 0.5:
                         continue
 
                     text = result["text"].strip()
+                    print("📝 Transcribed:", text)
+
                     if not text:
                         continue
 
-                    sentence_buffer += " " + text
-                    sentence_buffer = sentence_buffer.strip()
-
-                    if not is_complete_sentence(sentence_buffer, source_lang):
-                        continue
-                    if await hallucination_check(sentence_buffer):
-                        sentence_buffer = ""
+                    if await hallucination_check(text):
                         continue
 
-                    await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
-                    sentence_buffer = ""
+                    await stream_translate_with_gpt(websocket, text, source_lang, target_lang)
 
-    except Exception:
+    except Exception as e:
+        print("❌ WebSocket error:", str(e))
         await websocket.close()
 
 async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
-    prompt = (
-        f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
-        f"Rules:\n"
-        f"- Return only the translated sentence. No commentary, no meta info.\n"
-        f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
-        f"- No thank yous, greetings, or filler.\n\n"
-        f"Sentence: {text}"
-    )
-
     try:
+        prompt = (
+            f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
+            f"Rules:\n"
+            f"- Return only the translated sentence. No commentary, no meta info.\n"
+            f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
+            f"- No thank yous, greetings, or filler.\n\n"
+            f"Sentence: {text}"
+        )
+
         stream = await client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -148,8 +145,12 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
                 await websocket.send_text(f"[STREAM]{full}")
         await websocket.send_text(f"[DONE]{full}")
 
-    except Exception:
-        await websocket.send_text("[DONE]")
+    except Exception as e:
+        print("❌ Translation error:", e)
+        try:
+            await websocket.send_text("[DONE]")
+        except:
+            pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
