@@ -94,10 +94,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     result = model.transcribe(
                         wav.name,
-                        fp16=torch.cuda.is_available()
+                        fp16=True,
+                        temperature=0.0,
+                        condition_on_previous_text=False
                     )
 
-                    if result.get("no_speech_prob", 0) > 0.3:
+                    if result.get("no_speech_prob", 0) > 0.2:
                         continue
 
                     text = result["text"].strip()

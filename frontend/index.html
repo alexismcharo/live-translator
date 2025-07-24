@@ -63,15 +63,17 @@
 
           if (data.startsWith("[STREAM]")) {
             const text = data.replace("[STREAM]", "");
+
             if (!activeLine) {
               activeLine = document.createElement("div");
               activeLine.className = "text-gray-300 italic";
 
-              // Keep last finalized line if it exists
-              const lastFinal = Array.from(output.children).find(child => child.dataset.final === "true");
-              output.innerHTML = "";
-              if (lastFinal) output.appendChild(lastFinal);
+              // Keep last 2 finalized lines
+              const finalLines = Array.from(output.children).filter(child => child.dataset.final === "true");
+              const lastTwo = finalLines.slice(-2);
 
+              output.innerHTML = "";
+              lastTwo.forEach(line => output.appendChild(line));
               output.appendChild(activeLine);
             }
 
@@ -82,13 +84,19 @@
 
           else if (data.startsWith("[DONE]")) {
             const finalText = data.replace("[DONE]", "");
-            if (finalText) {
+            if (finalText && activeLine) {
               requestAnimationFrame(() => {
                 activeLine.textContent = finalText;
                 activeLine.classList.remove("italic", "text-gray-300");
                 activeLine.classList.add("text-white");
                 activeLine.dataset.final = "true";
                 activeLine = null;
+
+                // Trim to max 3 lines after finalizing
+                const allLines = Array.from(output.children);
+                if (allLines.length > 3) {
+                  output.removeChild(allLines[0]); // remove oldest
+                }
               });
             }
           }
@@ -115,7 +123,7 @@
           setTimeout(() => {
             recorder.stop();
             resolve();
-          }, 1900);
+          }, 2200);
         });
       }
     }
