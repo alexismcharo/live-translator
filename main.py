@@ -97,7 +97,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     result = model.transcribe(wav.name, fp16=True, word_timestamps=False)
 
                     # Filter based on confidence and silence
-                    if result.get("no_speech_prob", 0) > 0.3 and result.get("avg_logprob", -0.6) < -1.4:
+                    if result.get("no_speech_prob", 0) > 0.3:
                         continue
 
                     text = result["text"].strip()
