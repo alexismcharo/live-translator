@@ -33,7 +33,7 @@
     </div>
   </div>
 
-  <!-- 📝 Output Text Area Only -->
+  <!-- 📝 Output Text Area -->
   <div class="w-full max-w-4xl flex flex-col space-y-6 items-center">
     <div class="w-full">
       <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-tight tracking-wide min-h-[160px] w-full"></div>
@@ -50,8 +50,6 @@
     let socket = null;
     let recording = false;
     let activeLine = null;
-
-    const segmentMap = new Map(); // id => div
 
     directionSelect.onchange = () => stopRecording();
 
@@ -74,6 +72,14 @@
         socket.onmessage = (event) => {
           const data = event.data;
 
+          let paragraphDiv = output.querySelector(".paragraph");
+          if (!paragraphDiv) {
+            paragraphDiv = document.createElement("div");
+            paragraphDiv.className = "paragraph text-white";
+            paragraphDiv.dataset.final = "true";
+            output.appendChild(paragraphDiv);
+          }
+
           if (data.startsWith("[STREAM]")) {
             const text = data.replace("[STREAM]", "");
             if (!activeLine) {
@@ -86,26 +92,29 @@
             });
           } else if (data.startsWith("[DONE]")) {
             const payload = JSON.parse(data.replace("[DONE]", ""));
-            const { id, text } = payload;
+            const { text } = payload;
 
-            const segmentDiv = document.createElement("div");
-            segmentDiv.className = "paragraph text-white";
-            segmentDiv.id = `segment-${id}`;
-            segmentDiv.textContent = text;
-            output.appendChild(segmentDiv);
-            segmentMap.set(id, segmentDiv);
+            if (text && paragraphDiv) {
+              requestAnimationFrame(() => {
+                // Append new text
+                paragraphDiv.textContent += (paragraphDiv.textContent.endsWith(" ") ? "" : " ") + text;
 
-            if (activeLine) {
-              output.removeChild(activeLine);
-              activeLine = null;
-            }
-          } else if (data.startsWith("[UPDATE]")) {
-            const payload = JSON.parse(data.replace("[UPDATE]", ""));
-            const { id, text } = payload;
+                // Trim to max characters
+                const maxChars = 350;
+                if (paragraphDiv.textContent.length > maxChars) {
+                  const words = paragraphDiv.textContent.trim().split(" ");
+                  while (paragraphDiv.textContent.length > maxChars && words.length > 1) {
+                    words.shift();
+                    paragraphDiv.textContent = words.join(" ");
+                  }
+                }
 
-            const segmentDiv = segmentMap.get(id);
-            if (segmentDiv) {
-              segmentDiv.textContent = text;
+                // Clean up active line
+                if (activeLine) {
+                  output.removeChild(activeLine);
+                  activeLine = null;
+                }
+              });
             }
           }
         };

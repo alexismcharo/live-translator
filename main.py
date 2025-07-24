@@ -8,6 +8,7 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
+# ✅ Optimized for T4 GPU
 model = whisper.load_model("medium")
 
 app = FastAPI()
@@ -22,6 +23,7 @@ transcript_history = []  # [(segment_id, original_text)]
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
+# hallucination filter via GPT
 async def hallucination_check(text):
     try:
         prompt = (
@@ -114,7 +116,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # skip generic thank-you/subscribe phrases (hardcoded filter)
+                    # filter known thank-you phrases
                     text_lower = text.lower()
                     if (
                         "thank you" in text_lower
@@ -126,38 +128,50 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
 
-                    # optional GPT hallucination filter
+                    # GPT-based hallucination filter
                     if await hallucination_check(text):
                         print("🧠 GPT flagged as hallucination:", text)
                         continue
 
-                    # store and translate
+                    # assign ID and translate
                     segment_id = str(uuid.uuid4())
                     transcript_history.append((segment_id, text))
 
                     translated = await translate_text(text, source_lang, target_lang)
                     await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
-                    # context-aware update for previous segment
+                    # update previous translation using new context
                     if len(transcript_history) >= 2:
-                        context_segs = transcript_history[-2:]
-                        context_text = " ".join(s[1] for s in context_segs)
-                        improved = await translate_text(context_text, source_lang, target_lang)
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': context_segs[0][0], 'text': improved})}")
+                        prev, curr = transcript_history[-2][1], transcript_history[-1][1]
+                        improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
 
     except Exception as e:
-        print("❌ WebSocket error:", str(e))
+        print("❌ WebSocket error:", e)
         await websocket.close()
 
-async def translate_text(text, source_lang, target_lang):
-    prompt = (
-        f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
-        f"Rules:\n"
-        f"- Return only the translated sentence. No commentary, no meta info.\n"
-        f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
-        f"- No thank yous, greetings, or filler.\n\n"
-        f"Sentence: {text}"
-    )
+# main translation function with optional refinement mode
+async def translate_text(text, source_lang, target_lang, mode="default"):
+    if mode == "context":
+        previous, current = text
+        prompt = (
+            f"You are a strict, literal translation engine. Refine the translation of the previous sentence based on new context.\n\n"
+            f"Previous: {previous}\n"
+            f"Current: {current}\n\n"
+            f"Rules:\n"
+            f"- Do NOT repeat previous sentences unless their meaning changes.\n"
+            f"- Merge or rephrase ONLY if new information adds clarity.\n"
+            f"- Return the improved translation of the 'Previous' sentence only.\n"
+        )
+    else:
+        prompt = (
+            f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
+            f"Rules:\n"
+            f"- Return only the translated sentence. No commentary, no meta info.\n"
+            f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
+            f"- No thank yous, greetings, or filler.\n\n"
+            f"Sentence: {text}"
+        )
 
     try:
         response = await client.chat.completions.create(
