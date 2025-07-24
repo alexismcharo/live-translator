@@ -81,12 +81,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
                     try:
-                        subprocess.run(
-                            ["ffmpeg", "-y", "-i", raw.name, "-ar", "16000", "-ac", "1", wav.name],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE,
-                            check=True
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", raw.name,
+                            "-af", "silenceremove=1:0:-50dB",  # trims silence
+                            "-ar", "16000",
+                            "-ac", "1",
+                            wav.name
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        check=True
                         )
+
                     except subprocess.CalledProcessError as e:
                         print("❌ FFmpeg error: could not convert audio chunk")
                         print("🔎 FFmpeg stderr:", e.stderr.decode())
@@ -97,11 +104,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         fp16=True,
                         temperature=0.0,
                         condition_on_previous_text=False,
-                        hallucination_silence_threshold=0.2
+                        hallucination_silence_threshold=0.2,
+                        no_speech_threshold=0.3
                     )
 
-                    if result.get("no_speech_prob", 0) > 0.2:
-                        continue
 
                     text = result["text"].strip()
                     print("📝 Transcribed:", text)
