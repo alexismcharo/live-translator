@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]
 openai
-whisper
+openai-whisper
 python-dotenv
 ffmpeg-python
