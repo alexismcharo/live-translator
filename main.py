@@ -11,14 +11,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
-client = openai.AsyncOpenAI(api_key=api_key)  # Async version!
-model = whisper.load_model("medium")
+client = openai.AsyncOpenAI(api_key=api_key)
+model = whisper.load_model("large-v3")
 
 app = FastAPI()
 app.add_middleware(
@@ -34,7 +33,7 @@ def is_complete_sentence(text, lang):
     text = text.strip()
     if lang == "Japanese":
         patterns = [
-            r"です$", r"ます$", r"でした$", r"だ$", r"よ$", r"ね$", r"んです$", r"でしょう$", 
+            r"です$", r"ます$", r"でした$", r"だ$", r"よ$", r"ね$", r"んです$", r"でしょう$",
             r"か[。？\?]?$", r"[。！？?!]$"
         ]
         return any(re.search(p, text) for p in patterns) or len(text.split()) > 6
@@ -71,8 +70,6 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
 
     except Exception as e:
         print("❌ GPT streaming error:", e)
-        # do not send error to frontend UI
-        # await websocket.send_text("[Translation error]")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -80,23 +77,23 @@ async def websocket_endpoint(websocket: WebSocket):
     sentence_buffer = ""
     source_lang = None
     target_lang = None
+    last_sent = None
+
+    banned_phrases = [
+        "視聴ありがとうございました", "視聴ありがとうございます",  # thank you for watching
+        "チャンネル登録", "いいね", "高評価お願いします"            # YouTube lingo
+    ]
 
     try:
         settings = await websocket.receive_text()
-        try:
-            config = json.loads(settings)
-            direction = config.get("direction")
-            if direction == "en-ja":
-                source_lang, target_lang = "English", "Japanese"
-            elif direction == "ja-en":
-                source_lang, target_lang = "Japanese", "English"
-            else:
-                print("[Invalid translation direction]")
-                await websocket.close()
-                return
-            print(f"🔄 Direction set: {source_lang} → {target_lang}")
-        except json.JSONDecodeError:
-            print("[Failed to parse translation settings]")
+        config = json.loads(settings)
+        direction = config.get("direction")
+        if direction == "en-ja":
+            source_lang, target_lang = "English", "Japanese"
+        elif direction == "ja-en":
+            source_lang, target_lang = "Japanese", "English"
+        else:
+            print("[Invalid translation direction]")
             await websocket.close()
             return
 
@@ -106,7 +103,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             audio_bytes = message["bytes"]
-            print(f"🟢 Received chunk: {len(audio_bytes)} bytes")
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as input_file:
                 input_file.write(audio_bytes)
@@ -125,25 +121,32 @@ async def websocket_endpoint(websocket: WebSocket):
 
                         no_speech_prob = response.get("no_speech_prob", 0)
                         if no_speech_prob > 0.6:
-                            print(f"🧘 Skipping likely silence (no_speech_prob = {no_speech_prob:.2f})")
                             continue
 
                         chunk_text = response["text"].strip()
-                        print(f"📝 Transcript: '{chunk_text}'")
-
                         if not chunk_text:
-                            print("⚠️ Skipping empty chunk")
                             continue
 
                         sentence_buffer += " " + chunk_text
                         sentence_buffer = sentence_buffer.strip()
 
-                        if is_complete_sentence(sentence_buffer, source_lang):
-                            print(f"✅ Sentence complete: {sentence_buffer}")
-                            await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
+                        if not is_complete_sentence(sentence_buffer, source_lang):
+                            continue
+
+                        if sentence_buffer == last_sent:
+                            print("🔁 Skipping duplicate sentence")
                             sentence_buffer = ""
-                        else:
-                            print("⏳ Waiting for sentence to complete...")
+                            continue
+
+                        if any(p in sentence_buffer for p in banned_phrases):
+                            print(f"🚫 Skipping banned phrase: {sentence_buffer}")
+                            sentence_buffer = ""
+                            continue
+
+                        print(f"✅ Sending: {sentence_buffer}")
+                        await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
+                        last_sent = sentence_buffer
+                        sentence_buffer = ""
 
                     except subprocess.CalledProcessError as e:
                         print("❌ FFmpeg error:\n", e.stderr.decode())

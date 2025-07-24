@@ -83,10 +83,17 @@
           if (!activeLine) {
             activeLine = document.createElement("div");
             activeLine.className = "text-gray-300 italic";
+
+            // Limit to 2 messages
+            while (output.children.length >= 2) {
+              output.removeChild(output.firstChild);
+            }
+
             output.appendChild(activeLine);
           }
           activeLine.textContent = text + " ▌";
           output.scrollTop = output.scrollHeight;
+
         } else if (data.startsWith("[DONE]")) {
           const finalText = data.replace("[DONE]", "");
           const lang = finalText.match(/[\u3040-\u30ff\u4e00-\u9faf]/) ? "ja" : "en";
@@ -96,9 +103,10 @@
           activeLine.classList.remove("italic", "text-gray-300");
           activeLine.classList.add("text-white");
           activeLine = null;
+
         } else if (data.startsWith("[")) {
-          // System message — skip from UI
-          console.log("⚙️ System:", data);
+          // Suppress system messages in UI
+          console.log("⚙️", data);
         }
       };
 
