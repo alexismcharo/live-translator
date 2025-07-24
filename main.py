@@ -100,7 +100,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         subprocess.run([
                             "ffmpeg", "-y",
                             "-i", raw.name,
-                            "-af", "silenceremove=1:0:-50dB",
+                            "-af", "silenceremove=1:0:-40dB",
                             "-ar", "16000",
                             "-ac", "1",
                             wav.name
@@ -116,7 +116,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=5,
+                        beam_size=1,
                         condition_on_previous_text=True,
                         hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
@@ -197,7 +197,7 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=150
+            max_tokens=60
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
