@@ -12,13 +12,9 @@
   </style>
 </head>
 <body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
+  <h1 class="text-5xl font-bold tracking-tight text-center">Socious Translator</h1>
 
-  <!-- Header -->
-  <h1 class="text-5xl font-bold tracking-tight text-center">
-    Socious Translator
-  </h1>
-
-  <!-- Control Panel -->
+  <!-- Controls -->
   <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-6 flex flex-col items-center">
     <label class="block text-base font-medium">Translation Direction</label>
     <select id="direction" class="w-full max-w-md bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none text-center">
@@ -27,18 +23,14 @@
     </select>
 
     <div class="flex gap-4 mt-4">
-      <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">
-        Start Recording
-      </button>
-      <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">
-        Stop Recording
-      </button>
+      <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">Start Recording</button>
+      <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">Stop Recording</button>
     </div>
   </div>
 
-  <!-- Translation Display -->
+  <!-- Display -->
   <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-20 shadow-xl text-6xl font-semibold text-center leading-tight tracking-wide min-h-[320px] flex items-center justify-center">
-    <!-- Translation appears here -->
+    <!-- Translations appear here -->
   </div>
 
   <script>
@@ -58,7 +50,6 @@
     async function startChunkRecorder() {
       return new Promise((resolve) => {
         mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
         mediaRecorder.ondataavailable = async (e) => {
           if (e.data && e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
             const buffer = await e.data.arrayBuffer();
@@ -66,11 +57,10 @@
           }
           resolve();
         };
-
         mediaRecorder.start();
         setTimeout(() => {
           if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-        }, 3900);
+        }, 3000);  // Reduced chunk time
       });
     }
 
@@ -110,7 +100,7 @@
           activeLine.textContent = text + " ▌";
         } else if (data.startsWith("[DONE]")) {
           const finalText = data.replace("[DONE]", "");
-          if (!finalText.includes("already in")) {
+          if (finalText) {
             activeLine.textContent = finalText;
             activeLine.classList.remove("italic", "text-gray-300");
             activeLine.classList.add("text-white");

@@ -1,4 +1,3 @@
-# backend_with_hallucination_filters.py
 import tempfile, subprocess, uvicorn, openai, whisper, os, re, json, difflib
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,7 +10,7 @@ if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
 client = openai.AsyncOpenAI(api_key=api_key)
-model = whisper.load_model("medium")
+model = whisper.load_model("medium")  # Use 'medium' for faster response
 
 app = FastAPI()
 app.add_middleware(
@@ -33,31 +32,41 @@ def is_complete_sentence(text, lang):
 def is_too_similar(a, b, threshold=0.92):
     return difflib.SequenceMatcher(None, a, b).ratio() > threshold
 
-async def hallucination_check(text, source_lang):
+async def hallucination_check(text):
     try:
-        prompt = f"""You're a hallucination detector. If the following sentence sounds like a fabricated or generic phrase often produced by AI (e.g., “Thank you for watching”, “Subscribe”, etc.), return only: YES.
-Otherwise, return only: NO.
-Sentence: {text}"""
+        prompt = (
+        "You are a strict hallucination filter. Your task is to detect whether a sentence sounds like a generic, fabricated, or AI-generated filler phrase.\n\n"
+        "Examples of such hallucinations include phrases like:\n"
+        "- 'Thanks for watching'\n"
+        "- 'Don't forget to subscribe'\n"
+        "- 'Click the bell icon'\n"
+        "- 'See you in the next video'\n"
+        "- 'Like and share'\n\n"
+        "If the sentence contains **any** content resembling these types of generic video or social phrases, return **only**:\n"
+        "YES\n\n"
+        "If the sentence is real, meaningful, and does not resemble such hallucinated content, return **only**:\n"
+        "NO\n\n"
+        f"Sentence:\n{text}"
+        )
+
         result = await client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You judge whether a sentence is a hallucinated or common filler phrase. Answer strictly YES or NO."},
+                {"role": "system", "content": "You judge if the sentence is hallucinated filler. Only reply YES or NO."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0,
             max_tokens=1
         )
-        reply = result.choices[0].message.content.strip().upper()
-        return reply == "YES"
+        return result.choices[0].message.content.strip().upper() == "YES"
     except Exception:
-        return False  # fallback to not blocking
-        
+        return False  # Fallback to allow if error
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     sentence_buffer = ""
-    source_lang, target_lang, last_sent = None, None, None
+    source_lang = target_lang = last_sent = None
 
     try:
         settings = await websocket.receive_text()
@@ -99,16 +108,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     if not is_complete_sentence(sentence_buffer, source_lang):
                         continue
-
                     if last_sent and is_too_similar(sentence_buffer, last_sent):
                         sentence_buffer = ""
                         continue
-
-                    if await hallucination_check(sentence_buffer, source_lang):
+                    if await hallucination_check(sentence_buffer):
                         sentence_buffer = ""
                         continue
 
-                    # Translate
                     await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
                     last_sent = sentence_buffer
                     sentence_buffer = ""
@@ -118,21 +124,22 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
     prompt = (
-    f"You are a strict, literal translation engine. Translate the following sentence from {source_lang} to {target_lang}.\n\n"
-    f"Your rules:\n"
-    f"- Only return the translated sentence — no commentary, no explanations, no repetition of the original.\n"
-    f"- Do NOT add greetings, closings, thank yous, or YouTube-style phrases.\n"
-    f"- Preserve tone and formality; do not embellish or simplify.\n"
-    f"- If the input is already in the target language, do NOT say so — just return the sentence unchanged.\n"
-    f"- Do NOT say 'already in English' or similar — silently return the original.\n\n"
-    f"Sentence: {text}")
+    f"You are a highly disciplined, literal translation engine. Translate the following sentence from {source_lang} to {target_lang}.\n\n"
+    f"Strict translation rules:\n"
+    f"- Output only the translated sentence. Do not add any explanations, context, or commentary.\n"
+    f"- If the input is already in the target language, return it exactly as-is with no remarks.\n"
+    f"- Do NOT add greetings, closings, thank-you phrases, or generic filler (e.g., 'Thanks for watching').\n"
+    f"- Preserve tone, formality, and meaning precisely. Do not simplify or embellish.\n"
+    f"- Your response must be literal, faithful, and minimal.\n\n"
+    f"Sentence:\n{text}"
+    )
 
 
     try:
         stream = await client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a precise, literal translator."},
+                {"role": "system", "content": "You are a strict and literal translator."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
@@ -147,7 +154,6 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
                 full += delta
                 await websocket.send_text(f"[STREAM]{full}")
         await websocket.send_text(f"[DONE]{full}")
-
     except Exception:
         await websocket.send_text("[DONE]")
 
