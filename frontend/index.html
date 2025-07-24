@@ -61,19 +61,21 @@
         socket.onmessage = (event) => {
           const data = event.data;
 
+          // Make sure we have a paragraph block for finalized content
+          let paragraphDiv = output.querySelector(".paragraph");
+          if (!paragraphDiv) {
+            paragraphDiv = document.createElement("div");
+            paragraphDiv.className = "paragraph text-white";
+            paragraphDiv.dataset.final = "true";
+            output.appendChild(paragraphDiv);
+          }
+
           if (data.startsWith("[STREAM]")) {
             const text = data.replace("[STREAM]", "");
 
             if (!activeLine) {
               activeLine = document.createElement("div");
               activeLine.className = "text-gray-300 italic";
-
-              // Keep last 2 finalized lines
-              const finalLines = Array.from(output.children).filter(child => child.dataset.final === "true");
-              const lastTwo = finalLines.slice(-2);
-
-              output.innerHTML = "";
-              lastTwo.forEach(line => output.appendChild(line));
               output.appendChild(activeLine);
             }
 
@@ -83,19 +85,26 @@
           }
 
           else if (data.startsWith("[DONE]")) {
-            const finalText = data.replace("[DONE]", "");
-            if (finalText && activeLine) {
+            const finalText = data.replace("[DONE]", "").trim();
+            if (finalText && paragraphDiv) {
               requestAnimationFrame(() => {
-                activeLine.textContent = finalText;
-                activeLine.classList.remove("italic", "text-gray-300");
-                activeLine.classList.add("text-white");
-                activeLine.dataset.final = "true";
-                activeLine = null;
+                // Append finalized text to the paragraph
+                paragraphDiv.textContent += (paragraphDiv.textContent.endsWith(" ") ? "" : " ") + finalText;
 
-                // Trim to max 3 lines after finalizing
-                const allLines = Array.from(output.children);
-                if (allLines.length > 3) {
-                  output.removeChild(allLines[0]); // remove oldest
+                // Trim words from start if total exceeds character limit
+                const maxChars = 350;
+                if (paragraphDiv.textContent.length > maxChars) {
+                  const words = paragraphDiv.textContent.trim().split(" ");
+                  while (paragraphDiv.textContent.length > maxChars && words.length > 1) {
+                    words.shift(); // remove oldest word
+                    paragraphDiv.textContent = words.join(" ");
+                  }
+                }
+
+                // Clean up the active line
+                if (activeLine) {
+                  output.removeChild(activeLine);
+                  activeLine = null;
                 }
               });
             }
