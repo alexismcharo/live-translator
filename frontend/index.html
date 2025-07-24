@@ -3,33 +3,37 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Live Speech Translator</title>
+  <title>Socious Translator</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-[#111112] text-white font-sans min-h-screen flex items-center justify-center p-6">
-  <div class="w-full max-w-3xl space-y-10">
-    <h1 class="text-4xl font-bold text-center tracking-tight">
-      <span class="inline-block align-middle">🎙️</span> Live Speech Translator
-    </h1>
+<body class="bg-[#111112] text-white font-sans min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
 
-    <div class="bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-4">
-      <label class="block text-base font-medium mb-1">Translation Direction</label>
-      <select id="direction" class="w-full bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none">
-        <option value="en-ja">🇬🇧 English → 🇯🇵 Japanese</option>
-        <option value="ja-en">🇯🇵 Japanese → 🇬🇧 English</option>
-      </select>
+  <!-- Header -->
+  <h1 class="text-5xl font-bold tracking-tight text-center">
+    Socious Translator
+  </h1>
 
-      <div class="flex justify-between mt-6">
-        <button id="startBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-2 rounded transition-all">
-          Start Recording
-        </button>
-        <button id="stopBtn" disabled class="bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2 rounded transition-all opacity-50 cursor-not-allowed">
-          Stop Recording
-        </button>
-      </div>
+  <!-- Control Panel -->
+  <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-4">
+    <label class="block text-base font-medium mb-1">Translation Direction</label>
+    <select id="direction" class="w-full bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none">
+      <option value="en-ja">🇬🇧 English → 🇯🇵 Japanese</option>
+      <option value="ja-en">🇯🇵 Japanese → 🇬🇧 English</option>
+    </select>
+
+    <div class="flex justify-between mt-6">
+      <button id="startBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-2 rounded transition-all">
+        Start Recording
+      </button>
+      <button id="stopBtn" disabled class="bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2 rounded transition-all opacity-50 cursor-not-allowed">
+        Stop Recording
+      </button>
     </div>
+  </div>
 
-    <div id="output" class="bg-[#1A1A1C] rounded-lg p-6 shadow-inner min-h-[200px] max-h-[300px] overflow-y-auto space-y-4 text-xl"></div>
+  <!-- Translation Display -->
+  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-16 shadow-xl text-5xl font-semibold text-center leading-snug tracking-wide min-h-[300px] flex items-center justify-center">
+    <!-- Translated sentence appears here -->
   </div>
 
   <script>
@@ -84,16 +88,10 @@
             activeLine = document.createElement("div");
             activeLine.className = "text-gray-300 italic";
 
-            // Limit to 2 messages
-            while (output.children.length >= 2) {
-              output.removeChild(output.firstChild);
-            }
-
+            output.innerHTML = "";  // Clear current
             output.appendChild(activeLine);
           }
           activeLine.textContent = text + " ▌";
-          output.scrollTop = output.scrollHeight;
-
         } else if (data.startsWith("[DONE]")) {
           const finalText = data.replace("[DONE]", "");
           const lang = finalText.match(/[\u3040-\u30ff\u4e00-\u9faf]/) ? "ja" : "en";
@@ -103,16 +101,13 @@
           activeLine.classList.remove("italic", "text-gray-300");
           activeLine.classList.add("text-white");
           activeLine = null;
-
         } else if (data.startsWith("[")) {
-          // Suppress system messages in UI
-          console.log("⚙️", data);
+          console.log("⚙️", data); // System message — not shown
         }
       };
 
       socket.onopen = async () => {
         socket.send(JSON.stringify({ direction: directionSelect.value }));
-
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         recordingActive = true;
         loopRecorder();
