@@ -42,8 +42,8 @@ def is_complete_sentence(text, lang):
 
 async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
     prompt = (
-        f"You are a translator. Translate the following sentence from {source_lang} to {target_lang}. "
-        f"Do not explain or interpret. Return only the translated sentence.\n\n"
+        f"You are a translator. Translate this sentence from {source_lang} to {target_lang}. "
+        f"Respond only with the translated sentence, and avoid any meta commentary.\n\n"
         f"Sentence: {text}"
     )
 
@@ -51,7 +51,7 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
         stream = await client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a precise, literal translator."},
+                {"role": "system", "content": "You are a precise, literal translator. Do not explain or repeat content. Only output the translated sentence."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
@@ -80,8 +80,8 @@ async def websocket_endpoint(websocket: WebSocket):
     last_sent = None
 
     banned_phrases = [
-        "視聴ありがとうございました", "視聴ありがとうございます",  # thank you for watching
-        "チャンネル登録", "いいね", "高評価お願いします"            # YouTube lingo
+        "視聴ありがとうございました", "視聴ありがとうございます",
+        "チャンネル登録", "いいね", "高評価お願いします"
     ]
 
     try:
@@ -93,7 +93,6 @@ async def websocket_endpoint(websocket: WebSocket):
         elif direction == "ja-en":
             source_lang, target_lang = "Japanese", "English"
         else:
-            print("[Invalid translation direction]")
             await websocket.close()
             return
 
@@ -113,14 +112,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         subprocess.run(
                             ["ffmpeg", "-y", "-i", input_file.name, "-ar", "16000", "-ac", "1", output_wav.name],
                             stdout=subprocess.DEVNULL,
-                            stderr=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
                             check=True
                         )
 
                         response = model.transcribe(output_wav.name, fp16=True, word_timestamps=False)
 
-                        no_speech_prob = response.get("no_speech_prob", 0)
-                        if no_speech_prob > 0.4:
+                        if response.get("no_speech_prob", 0) > 0.2:
                             continue
 
                         chunk_text = response["text"].strip()
@@ -134,27 +132,21 @@ async def websocket_endpoint(websocket: WebSocket):
                             continue
 
                         if sentence_buffer == last_sent:
-                            print("🔁 Skipping duplicate sentence")
                             sentence_buffer = ""
                             continue
 
                         if any(p in sentence_buffer for p in banned_phrases):
-                            print(f"🚫 Skipping banned phrase: {sentence_buffer}")
                             sentence_buffer = ""
                             continue
 
-                        print(f"✅ Sending: {sentence_buffer}")
                         await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
                         last_sent = sentence_buffer
                         sentence_buffer = ""
 
-                    except subprocess.CalledProcessError as e:
-                        print("❌ FFmpeg error:\n", e.stderr.decode())
-                    except Exception as err:
-                        print("❌ Processing error:\n", err)
+                    except Exception:
+                        continue
 
-    except Exception as e:
-        print("🚫 WebSocket error:", e)
+    except Exception:
         await websocket.close()
 
 if __name__ == "__main__":

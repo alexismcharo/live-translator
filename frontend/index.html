@@ -11,7 +11,7 @@
     }
   </style>
 </head>
-<body class="bg-[#111112] text-white font-sans min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
+<body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
 
   <!-- Header -->
   <h1 class="text-5xl font-bold tracking-tight text-center">
@@ -53,9 +53,7 @@
     let recordingActive = false;
     let activeLine = null;
 
-    directionSelect.onchange = () => {
-      stopRecording();
-    };
+    directionSelect.onchange = () => stopRecording();
 
     async function startChunkRecorder() {
       return new Promise((resolve) => {
@@ -71,9 +69,7 @@
 
         mediaRecorder.start();
         setTimeout(() => {
-          if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
-          }
+          if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
         }, 3900);
       });
     }
@@ -90,7 +86,6 @@
 
       socket.onopen = async () => {
         socket.send(JSON.stringify({ direction: directionSelect.value }));
-
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         recordingActive = true;
         loopRecorder();
@@ -109,16 +104,18 @@
           if (!activeLine) {
             activeLine = document.createElement("div");
             activeLine.className = "text-gray-300 italic";
-            output.innerHTML = "";  // Clear
+            output.innerHTML = "";
             output.appendChild(activeLine);
           }
           activeLine.textContent = text + " ▌";
         } else if (data.startsWith("[DONE]")) {
           const finalText = data.replace("[DONE]", "");
-          activeLine.textContent = finalText;
-          activeLine.classList.remove("italic", "text-gray-300");
-          activeLine.classList.add("text-white");
-          activeLine = null;
+          if (!finalText.includes("already in")) {
+            activeLine.textContent = finalText;
+            activeLine.classList.remove("italic", "text-gray-300");
+            activeLine.classList.add("text-white");
+            activeLine = null;
+          }
         }
       };
     };
