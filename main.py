@@ -10,7 +10,7 @@ if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
 client = openai.AsyncOpenAI(api_key=api_key)
-model = whisper.load_model("medium")  # Use 'medium' for better speed-performance balance
+model = whisper.load_model("large")  
 
 app = FastAPI()
 app.add_middleware(
@@ -49,7 +49,7 @@ async def hallucination_check(text):
         )
 
         result = await client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You judge if the sentence is hallucinated filler. Only reply YES or NO."},
                 {"role": "user", "content": prompt}
@@ -97,7 +97,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     result = model.transcribe(wav.name, fp16=True, word_timestamps=False)
 
                     # Filter based on confidence and silence
-                    if result.get("no_speech_prob", 0) > 0.3 or result.get("avg_logprob", -0.6) < -1.4:
+                    if result.get("no_speech_prob", 0) > 0.3 and result.get("avg_logprob", -0.6) < -1.4:
                         continue
 
                     text = result["text"].strip()
@@ -133,7 +133,7 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
 
     try:
         stream = await client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You are a strict and literal translator."},
                 {"role": "user", "content": prompt}
