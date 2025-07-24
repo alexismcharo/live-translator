@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Live Speech Translator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-[#111112] text-white font-sans min-h-screen flex items-center justify-center p-6">
+  <div class="w-full max-w-3xl space-y-10">
+    <h1 class="text-4xl font-bold text-center tracking-tight">
+      <span class="inline-block align-middle">🎙️</span> Live Speech Translator
+    </h1>
+
+    <!-- Card -->
+    <div class="bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-4">
+      <label class="block text-base font-medium mb-1">Translation Direction</label>
+      <select id="direction" class="w-full bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none">
+        <option value="en-ja">🇬🇧 English → 🇯🇵 Japanese</option>
+        <option value="ja-en">🇯🇵 Japanese → 🇬🇧 English</option>
+      </select>
+
+      <div class="flex justify-between mt-6">
+        <button id="startBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-2 rounded transition-all">
+          Start Recording
+        </button>
+        <button id="stopBtn" disabled class="bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2 rounded transition-all opacity-50 cursor-not-allowed">
+          Stop Recording
+        </button>
+      </div>
+    </div>
+
+    <!-- Output Box -->
+    <div id="output" class="bg-[#1A1A1C] rounded-lg p-8 min-h-[150px] shadow-md text-3xl font-semibold text-center leading-relaxed tracking-wide">
+      <!-- Translated sentence appears here -->
+    </div>
+  </div>
+
+  <script>
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const output = document.getElementById("output");
+    const directionSelect = document.getElementById("direction");
+
+    let stream = null;
+    let socket = null;
+    let intervalId = null;
+    let mediaRecorder = null;
+
+    async function startChunkRecorder() {
+      mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
+      mediaRecorder.ondataavailable = async (e) => {
+        if (e.data && e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+          const buffer = await e.data.arrayBuffer();
+          socket.send(buffer);
+        }
+      };
+
+      mediaRecorder.start();
+      setTimeout(() => {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+      }, 4900);
+    }
+
+    startBtn.onclick = async () => {
+      output.innerText = "";
+      socket = new WebSocket("ws://localhost:8000/ws");
+
+      socket.onopen = () => {
+        const direction = directionSelect.value;
+        socket.send(JSON.stringify({ direction }));
+      };
+
+      socket.onmessage = (event) => {
+        const lang = event.data.match(/[\u3040-\u30ff\u4e00-\u9faf]/) ? "ja" : "en";
+        const flag = lang === "ja" ? "\u{1F1EF}\u{1F1F5}" : "\u{1F1EC}\u{1F1E7}";
+        output.innerText = `${flag} ${event.data}`;
+      };
+
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      await startChunkRecorder();
+      intervalId = setInterval(startChunkRecorder, 5000);
+
+      startBtn.disabled = true;
+      startBtn.classList.add("opacity-50", "cursor-not-allowed");
+      stopBtn.disabled = false;
+      stopBtn.classList.remove("opacity-50", "cursor-not-allowed");
+    };
+
+    stopBtn.onclick = () => {
+      clearInterval(intervalId);
+      if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+
+      startBtn.disabled = false;
+      startBtn.classList.remove("opacity-50", "cursor-not-allowed");
+      stopBtn.disabled = true;
+      stopBtn.classList.add("opacity-50", "cursor-not-allowed");
+    };
+  </script>
+</body>
+</html>

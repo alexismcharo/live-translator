@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  whisper-backend:
+    build: .
+    container_name: whisper-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - .:/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+    runtime: nvidia

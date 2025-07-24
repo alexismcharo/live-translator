@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.log
+
+# Virtual env
+venv/
+env/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+
+# Docker
+*.pid
+*.tar
+*.bak
+*.swp
+*.sock
+
+# Node (if frontend uses npm)
+node_modules/
+dist/
+*.lock
+
+# Frontend build cache (optional)
+*.webm
+*.wav
+*.mp3
+
+# VSCode/IDE
+.vscode/
+.idea/
