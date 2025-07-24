@@ -96,7 +96,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        condition_on_previous_text=False
+                        condition_on_previous_text=False,
+                        hallucination_silence_threshold=0.2
                     )
 
                     if result.get("no_speech_prob", 0) > 0.2:
