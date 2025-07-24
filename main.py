@@ -8,6 +8,8 @@ import re
 import json
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -28,6 +30,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
+
+@app.get("/")
+async def serve_index():
+    return FileResponse(os.path.join("frontend", "index.html"))
 
 # GPT translation
 def translate_with_gpt(text, source_lang, target_lang):
@@ -51,7 +57,7 @@ def translate_with_gpt(text, source_lang, target_lang):
         print("❌ GPT translation error:", e)
         return "[Translation error]"
 
-# hybrid sentence completeness check
+# Sentence completeness check
 def is_complete_sentence(text, lang):
     text = text.strip()
     if lang == "Japanese":
