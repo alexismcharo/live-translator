@@ -120,7 +120,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         response = model.transcribe(output_wav.name, fp16=True, word_timestamps=False)
 
                         no_speech_prob = response.get("no_speech_prob", 0)
-                        if no_speech_prob > 0.6:
+                        if no_speech_prob > 0.4:
                             continue
 
                         chunk_text = response["text"].strip()
