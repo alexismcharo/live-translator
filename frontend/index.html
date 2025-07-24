@@ -45,7 +45,7 @@
     async function startRecording() {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        socket = new WebSocket("ws://localhost:8000/ws");
+        socket = new WebSocket("ws://34.69.242.211:8000/ws");
 
         socket.onopen = () => {
           socket.send(JSON.stringify({ direction: directionSelect.value }));
