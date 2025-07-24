@@ -1,11 +1,5 @@
-import tempfile
-import subprocess
-import uvicorn
-import openai
-import whisper
-import os
-import re
-import json
+# backend_with_hallucination_filters.py
+import tempfile, subprocess, uvicorn, openai, whisper, os, re, json, difflib
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -17,7 +11,7 @@ if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
 client = openai.AsyncOpenAI(api_key=api_key)
-model = whisper.load_model("large-v3")
+model = whisper.load_model("medium")
 
 app = FastAPI()
 app.add_middleware(
@@ -32,26 +26,113 @@ async def serve_index():
 def is_complete_sentence(text, lang):
     text = text.strip()
     if lang == "Japanese":
-        patterns = [
-            r"です$", r"ます$", r"でした$", r"だ$", r"よ$", r"ね$", r"んです$", r"でしょう$",
-            r"か[。？\?]?$", r"[。！？?!]$"
-        ]
+        patterns = [r"です$", r"ます$", r"でした$", r"だ$", r"よ$", r"ね$", r"んです$", r"でしょう$", r"か[。？\?]?$", r"[。！？?!]$"]
         return any(re.search(p, text) for p in patterns) or len(text.split()) > 6
-    else:
-        return bool(re.search(r"[.!?]$", text))
+    return bool(re.search(r"[.!?]$", text))
+
+def is_too_similar(a, b, threshold=0.92):
+    return difflib.SequenceMatcher(None, a, b).ratio() > threshold
+
+async def hallucination_check(text, source_lang):
+    try:
+        prompt = f"""You're a hallucination detector. If the following sentence sounds like a fabricated or generic phrase often produced by AI (e.g., “Thank you for watching”, “Subscribe”, etc.), return only: YES.
+Otherwise, return only: NO.
+Sentence: {text}"""
+        result = await client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You judge whether a sentence is a hallucinated or common filler phrase. Answer strictly YES or NO."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0,
+            max_tokens=1
+        )
+        reply = result.choices[0].message.content.strip().upper()
+        return reply == "YES"
+    except Exception:
+        return False  # fallback to not blocking
+        
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    sentence_buffer = ""
+    source_lang, target_lang, last_sent = None, None, None
+
+    try:
+        settings = await websocket.receive_text()
+        config = json.loads(settings)
+        if config.get("direction") == "en-ja":
+            source_lang, target_lang = "English", "Japanese"
+        elif config.get("direction") == "ja-en":
+            source_lang, target_lang = "Japanese", "English"
+        else:
+            await websocket.close()
+            return
+
+        while True:
+            msg = await websocket.receive()
+            if "bytes" not in msg:
+                continue
+
+            audio = msg["bytes"]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
+                raw.write(audio)
+                raw.flush()
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", raw.name, "-ar", "16000", "-ac", "1", wav.name],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+                    )
+
+                    result = model.transcribe(wav.name, fp16=True, word_timestamps=False)
+                    if result.get("no_speech_prob", 0) > 0.2 or result.get("avg_logprob", -0.6) < -1.0:
+                        continue
+
+                    text = result["text"].strip()
+                    if not text:
+                        continue
+
+                    sentence_buffer += " " + text
+                    sentence_buffer = sentence_buffer.strip()
+
+                    if not is_complete_sentence(sentence_buffer, source_lang):
+                        continue
+
+                    if last_sent and is_too_similar(sentence_buffer, last_sent):
+                        sentence_buffer = ""
+                        continue
+
+                    if await hallucination_check(sentence_buffer, source_lang):
+                        sentence_buffer = ""
+                        continue
+
+                    # Translate
+                    await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
+                    last_sent = sentence_buffer
+                    sentence_buffer = ""
+
+    except Exception:
+        await websocket.close()
 
 async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
     prompt = (
-        f"You are a translator. Translate this sentence from {source_lang} to {target_lang}. "
-        f"Respond only with the translated sentence, and avoid any meta commentary.\n\n"
-        f"Sentence: {text}"
-    )
+    f"You are a strict, literal translation engine. Translate the following sentence from {source_lang} to {target_lang}.\n\n"
+    f"Your rules:\n"
+    f"- Only return the translated sentence — no commentary, no explanations, no repetition of the original.\n"
+    f"- Do NOT add greetings, closings, thank yous, or YouTube-style phrases.\n"
+    f"- Preserve tone and formality; do not embellish or simplify.\n"
+    f"- If the input is already in the target language, do NOT say so — just return the sentence unchanged.\n"
+    f"- Do NOT say 'already in English' or similar — silently return the original.\n\n"
+    f"Sentence: {text}")
+
 
     try:
         stream = await client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a precise, literal translator. Do not explain or repeat content. Only output the translated sentence."},
+                {"role": "system", "content": "You are a precise, literal translator."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
@@ -65,89 +146,10 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
             if delta:
                 full += delta
                 await websocket.send_text(f"[STREAM]{full}")
-
         await websocket.send_text(f"[DONE]{full}")
 
-    except Exception as e:
-        print("❌ GPT streaming error:", e)
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    sentence_buffer = ""
-    source_lang = None
-    target_lang = None
-    last_sent = None
-
-    banned_phrases = [
-        "視聴ありがとうございました", "視聴ありがとうございます",
-        "チャンネル登録", "いいね", "高評価お願いします"
-    ]
-
-    try:
-        settings = await websocket.receive_text()
-        config = json.loads(settings)
-        direction = config.get("direction")
-        if direction == "en-ja":
-            source_lang, target_lang = "English", "Japanese"
-        elif direction == "ja-en":
-            source_lang, target_lang = "Japanese", "English"
-        else:
-            await websocket.close()
-            return
-
-        while True:
-            message = await websocket.receive()
-            if "bytes" not in message:
-                continue
-
-            audio_bytes = message["bytes"]
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as input_file:
-                input_file.write(audio_bytes)
-                input_file.flush()
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as output_wav:
-                    try:
-                        subprocess.run(
-                            ["ffmpeg", "-y", "-i", input_file.name, "-ar", "16000", "-ac", "1", output_wav.name],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            check=True
-                        )
-
-                        response = model.transcribe(output_wav.name, fp16=True, word_timestamps=False)
-
-                        if response.get("no_speech_prob", 0) > 0.2:
-                            continue
-
-                        chunk_text = response["text"].strip()
-                        if not chunk_text:
-                            continue
-
-                        sentence_buffer += " " + chunk_text
-                        sentence_buffer = sentence_buffer.strip()
-
-                        if not is_complete_sentence(sentence_buffer, source_lang):
-                            continue
-
-                        if sentence_buffer == last_sent:
-                            sentence_buffer = ""
-                            continue
-
-                        if any(p in sentence_buffer for p in banned_phrases):
-                            sentence_buffer = ""
-                            continue
-
-                        await stream_translate_with_gpt(websocket, sentence_buffer, source_lang, target_lang)
-                        last_sent = sentence_buffer
-                        sentence_buffer = ""
-
-                    except Exception:
-                        continue
-
     except Exception:
-        await websocket.close()
+        await websocket.send_text("[DONE]")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
