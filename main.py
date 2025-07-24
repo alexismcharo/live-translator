@@ -9,7 +9,7 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-model = whisper.load_model("medium")
+model = whisper.load_model("large-v3")
 
 app = FastAPI()
 app.add_middleware(
