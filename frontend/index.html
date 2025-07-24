@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Socious Translator</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: 'Inter', 'Helvetica Neue', sans-serif;
+    }
+  </style>
 </head>
 <body class="bg-[#111112] text-white font-sans min-h-screen flex flex-col items-center justify-center p-6 space-y-10">
 
@@ -14,26 +19,26 @@
   </h1>
 
   <!-- Control Panel -->
-  <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-4">
-    <label class="block text-base font-medium mb-1">Translation Direction</label>
-    <select id="direction" class="w-full bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none">
-      <option value="en-ja">🇬🇧 English → 🇯🇵 Japanese</option>
-      <option value="ja-en">🇯🇵 Japanese → 🇬🇧 English</option>
+  <div class="w-full max-w-2xl bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-6 flex flex-col items-center">
+    <label class="block text-base font-medium">Translation Direction</label>
+    <select id="direction" class="w-full max-w-md bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none text-center">
+      <option value="en-ja">English → Japanese</option>
+      <option value="ja-en">Japanese → English</option>
     </select>
 
-    <div class="flex justify-between mt-6">
-      <button id="startBtn" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold px-6 py-2 rounded transition-all">
+    <div class="flex gap-4 mt-4">
+      <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">
         Start Recording
       </button>
-      <button id="stopBtn" disabled class="bg-red-600 hover:bg-red-700 text-white font-semibold px-6 py-2 rounded transition-all opacity-50 cursor-not-allowed">
+      <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">
         Stop Recording
       </button>
     </div>
   </div>
 
   <!-- Translation Display -->
-  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-16 shadow-xl text-5xl font-semibold text-center leading-snug tracking-wide min-h-[300px] flex items-center justify-center">
-    <!-- Translated sentence appears here -->
+  <div id="output" class="w-full max-w-6xl bg-[#1A1A1C] rounded-lg px-10 py-20 shadow-xl text-6xl font-semibold text-center leading-tight tracking-wide min-h-[320px] flex items-center justify-center">
+    <!-- Translation appears here -->
   </div>
 
   <script>
@@ -47,6 +52,10 @@
     let mediaRecorder = null;
     let recordingActive = false;
     let activeLine = null;
+
+    directionSelect.onchange = () => {
+      stopRecording();
+    };
 
     async function startChunkRecorder() {
       return new Promise((resolve) => {
@@ -79,35 +88,9 @@
     startBtn.onclick = async () => {
       socket = new WebSocket("ws://34.69.242.211:8000/ws");
 
-      socket.onmessage = (event) => {
-        const data = event.data;
-
-        if (data.startsWith("[STREAM]")) {
-          const text = data.replace("[STREAM]", "");
-          if (!activeLine) {
-            activeLine = document.createElement("div");
-            activeLine.className = "text-gray-300 italic";
-
-            output.innerHTML = "";  // Clear current
-            output.appendChild(activeLine);
-          }
-          activeLine.textContent = text + " ▌";
-        } else if (data.startsWith("[DONE]")) {
-          const finalText = data.replace("[DONE]", "");
-          const lang = finalText.match(/[\u3040-\u30ff\u4e00-\u9faf]/) ? "ja" : "en";
-          const flag = lang === "ja" ? "🇯🇵" : "🇬🇧";
-
-          activeLine.textContent = `${flag} ${finalText}`;
-          activeLine.classList.remove("italic", "text-gray-300");
-          activeLine.classList.add("text-white");
-          activeLine = null;
-        } else if (data.startsWith("[")) {
-          console.log("⚙️", data); // System message — not shown
-        }
-      };
-
       socket.onopen = async () => {
         socket.send(JSON.stringify({ direction: directionSelect.value }));
+
         stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         recordingActive = true;
         loopRecorder();
@@ -117,9 +100,30 @@
         stopBtn.disabled = false;
         stopBtn.classList.remove("opacity-50", "cursor-not-allowed");
       };
+
+      socket.onmessage = (event) => {
+        const data = event.data;
+
+        if (data.startsWith("[STREAM]")) {
+          const text = data.replace("[STREAM]", "");
+          if (!activeLine) {
+            activeLine = document.createElement("div");
+            activeLine.className = "text-gray-300 italic";
+            output.innerHTML = "";  // Clear
+            output.appendChild(activeLine);
+          }
+          activeLine.textContent = text + " ▌";
+        } else if (data.startsWith("[DONE]")) {
+          const finalText = data.replace("[DONE]", "");
+          activeLine.textContent = finalText;
+          activeLine.classList.remove("italic", "text-gray-300");
+          activeLine.classList.add("text-white");
+          activeLine = null;
+        }
+      };
     };
 
-    stopBtn.onclick = () => {
+    function stopRecording() {
       recordingActive = false;
       if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
       if (stream) stream.getTracks().forEach(track => track.stop());
@@ -129,7 +133,9 @@
       startBtn.classList.remove("opacity-50", "cursor-not-allowed");
       stopBtn.disabled = true;
       stopBtn.classList.add("opacity-50", "cursor-not-allowed");
-    };
+    }
+
+    stopBtn.onclick = stopRecording;
   </script>
 </body>
 </html>
