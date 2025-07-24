@@ -62,7 +62,7 @@
         if (mediaRecorder && mediaRecorder.state !== "inactive") {
           mediaRecorder.stop();
         }
-      }, 2400);
+      }, 3900);
     }
 
     startBtn.onclick = async () => {
@@ -83,7 +83,7 @@
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       await startChunkRecorder();
-      intervalId = setInterval(startChunkRecorder, 2500);
+      intervalId = setInterval(startChunkRecorder, 4000);
 
       startBtn.disabled = true;
       startBtn.classList.add("opacity-50", "cursor-not-allowed");
