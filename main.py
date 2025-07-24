@@ -17,8 +17,8 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
-client = openai.OpenAI(api_key=api_key)
-model = whisper.load_model("medium")  # You can switch to "small" for faster response
+client = openai.AsyncOpenAI(api_key=api_key)  # Async version!
+model = whisper.load_model("medium")
 
 app = FastAPI()
 app.add_middleware(
@@ -49,7 +49,7 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
     )
 
     try:
-        stream = client.chat.completions.create(
+        stream = await client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": "You are a precise, literal translator."},
@@ -71,7 +71,8 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
 
     except Exception as e:
         print("❌ GPT streaming error:", e)
-        await websocket.send_text("[Translation error]")
+        # do not send error to frontend UI
+        # await websocket.send_text("[Translation error]")
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -90,13 +91,12 @@ async def websocket_endpoint(websocket: WebSocket):
             elif direction == "ja-en":
                 source_lang, target_lang = "Japanese", "English"
             else:
-                await websocket.send_text("[Invalid translation direction]")
+                print("[Invalid translation direction]")
                 await websocket.close()
                 return
             print(f"🔄 Direction set: {source_lang} → {target_lang}")
-            await websocket.send_text(f"[Ready to translate from {source_lang} to {target_lang}]")
         except json.JSONDecodeError:
-            await websocket.send_text("[Failed to parse translation settings]")
+            print("[Failed to parse translation settings]")
             await websocket.close()
             return
 
@@ -121,10 +121,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             check=True
                         )
 
-                        # Transcribe using Whisper
                         response = model.transcribe(output_wav.name, fp16=True, word_timestamps=False)
 
-                        # Filter out silence or noise
                         no_speech_prob = response.get("no_speech_prob", 0)
                         if no_speech_prob > 0.6:
                             print(f"🧘 Skipping likely silence (no_speech_prob = {no_speech_prob:.2f})")

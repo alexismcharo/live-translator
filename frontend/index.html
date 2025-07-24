@@ -12,7 +12,6 @@
       <span class="inline-block align-middle">🎙️</span> Live Speech Translator
     </h1>
 
-    <!-- Card -->
     <div class="bg-[#1A1A1C] rounded-lg p-6 shadow-lg space-y-4">
       <label class="block text-base font-medium mb-1">Translation Direction</label>
       <select id="direction" class="w-full bg-[#2A2A2E] text-white border border-gray-700 rounded px-4 py-2 focus:outline-none">
@@ -30,7 +29,6 @@
       </div>
     </div>
 
-    <!-- Transcript Output -->
     <div id="output" class="bg-[#1A1A1C] rounded-lg p-6 shadow-inner min-h-[200px] max-h-[300px] overflow-y-auto space-y-4 text-xl"></div>
   </div>
 
@@ -70,7 +68,7 @@
     async function loopRecorder() {
       while (recordingActive) {
         await startChunkRecorder();
-        await new Promise(r => setTimeout(r, 100)); // buffer between chunks
+        await new Promise(r => setTimeout(r, 100));
       }
     }
 
@@ -99,10 +97,8 @@
           activeLine.classList.add("text-white");
           activeLine = null;
         } else if (data.startsWith("[")) {
-          const msg = document.createElement("div");
-          msg.textContent = data;
-          msg.className = "text-sm text-yellow-400";
-          output.appendChild(msg);
+          // System message — skip from UI
+          console.log("⚙️ System:", data);
         }
       };
 
