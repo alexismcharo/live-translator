@@ -8,8 +8,22 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# ✅ Optimized for T4 GPU
-model = whisper.load_model("medium")
+try:
+    subprocess.run([
+        "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+        "-t", "0.5", "-ar", "16000", "-ac", "1",
+        "-y", "/tmp/warm.wav"
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except:
+    pass
+
+# optimized for T4 GPU
+model = whisper.load_model("large-v3")
+
+try:
+    model.transcribe("warmup.wav", language="en", fp16=True)
+except:
+    pass
 
 app = FastAPI()
 app.add_middleware(
@@ -103,7 +117,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         fp16=True,
                         temperature=0.0,
                         beam_size=5,
-                        condition_on_previous_text=False,
+                        condition_on_previous_text=True,
                         hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
                         language="en" if source_lang == "English" else "ja",
@@ -162,6 +176,8 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
             f"- Do NOT repeat previous sentences unless their meaning changes.\n"
             f"- Merge or rephrase ONLY if new information adds clarity.\n"
             f"- Return the improved translation of the 'Previous' sentence only.\n"
+            f"- Do NOT repeat phrases that were already translated unless absolutely necessary.\n"
+            f"- If a sentence is identical or near-identical to the previous one, translate it only once.\n"
         )
     else:
         prompt = (
