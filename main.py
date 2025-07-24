@@ -97,7 +97,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         fp16=torch.cuda.is_available()
                     )
 
-                    if result.get("no_speech_prob", 0) > 0.5:
+                    if result.get("no_speech_prob", 0) > 0.3:
                         continue
 
                     text = result["text"].strip()
