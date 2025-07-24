@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, re, json, difflib
+import tempfile, subprocess, uvicorn, openai, whisper, os, re, json
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -10,7 +10,7 @@ if not api_key:
     raise ValueError("❌ OPENAI_API_KEY is missing from .env")
 
 client = openai.AsyncOpenAI(api_key=api_key)
-model = whisper.load_model("medium")  # Use 'medium' for faster response
+model = whisper.load_model("medium")  # Use 'medium' for better speed-performance balance
 
 app = FastAPI()
 app.add_middleware(
@@ -22,6 +22,7 @@ app.add_middleware(
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
+# Heuristic check to determine whether a sentence is likely complete
 def is_complete_sentence(text, lang):
     text = text.strip()
     if lang == "Japanese":
@@ -29,24 +30,22 @@ def is_complete_sentence(text, lang):
         return any(re.search(p, text) for p in patterns) or len(text.split()) > 6
     return bool(re.search(r"[.!?]$", text))
 
-def is_too_similar(a, b, threshold=0.92):
-    return difflib.SequenceMatcher(None, a, b).ratio() > threshold
-
+# Uses GPT to classify whether a sentence sounds like generic filler
 async def hallucination_check(text):
     try:
         prompt = (
-        "You are a strict hallucination filter. Your task is to detect whether a sentence sounds like a generic, fabricated, or AI-generated filler phrase.\n\n"
-        "Examples of such hallucinations include phrases like:\n"
-        "- 'Thanks for watching'\n"
-        "- 'Don't forget to subscribe'\n"
-        "- 'Click the bell icon'\n"
-        "- 'See you in the next video'\n"
-        "- 'Like and share'\n\n"
-        "If the sentence contains **any** content resembling these types of generic video or social phrases, return **only**:\n"
-        "YES\n\n"
-        "If the sentence is real, meaningful, and does not resemble such hallucinated content, return **only**:\n"
-        "NO\n\n"
-        f"Sentence:\n{text}"
+            "You are a strict hallucination filter. Your task is to detect whether a sentence sounds like a generic, fabricated, or AI-generated filler phrase.\n\n"
+            "Examples of such hallucinations include phrases like:\n"
+            "- 'Thanks for watching'\n"
+            "- 'Don't forget to subscribe'\n"
+            "- 'Click the bell icon'\n"
+            "- 'See you in the next video'\n"
+            "- 'Like and share'\n\n"
+            "If the sentence contains any such content, return only:\n"
+            "YES\n\n"
+            "If the sentence is meaningful and not hallucinated, return only:\n"
+            "NO\n\n"
+            f"Sentence:\n{text}"
         )
 
         result = await client.chat.completions.create(
@@ -60,7 +59,7 @@ async def hallucination_check(text):
         )
         return result.choices[0].message.content.strip().upper() == "YES"
     except Exception:
-        return False  # Fallback to allow if error
+        return False  # fallback: allow through if GPT call fails
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -96,7 +95,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
 
                     result = model.transcribe(wav.name, fp16=True, word_timestamps=False)
-                    if result.get("no_speech_prob", 0) > 0.2 or result.get("avg_logprob", -0.6) < -1.0:
+
+                    # Filter based on confidence and silence
+                    if result.get("no_speech_prob", 0) > 0.3 or result.get("avg_logprob", -0.6) < -1.4:
                         continue
 
                     text = result["text"].strip()
@@ -107,9 +108,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     sentence_buffer = sentence_buffer.strip()
 
                     if not is_complete_sentence(sentence_buffer, source_lang):
-                        continue
-                    if last_sent and is_too_similar(sentence_buffer, last_sent):
-                        sentence_buffer = ""
                         continue
                     if await hallucination_check(sentence_buffer):
                         sentence_buffer = ""
@@ -122,18 +120,16 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         await websocket.close()
 
+# Sends translation stream using GPT
 async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
     prompt = (
-    f"You are a highly disciplined, literal translation engine. Translate the following sentence from {source_lang} to {target_lang}.\n\n"
-    f"Strict translation rules:\n"
-    f"- Output only the translated sentence. Do not add any explanations, context, or commentary.\n"
-    f"- If the input is already in the target language, return it exactly as-is with no remarks.\n"
-    f"- Do NOT add greetings, closings, thank-you phrases, or generic filler (e.g., 'Thanks for watching').\n"
-    f"- Preserve tone, formality, and meaning precisely. Do not simplify or embellish.\n"
-    f"- Your response must be literal, faithful, and minimal.\n\n"
-    f"Sentence:\n{text}"
+        f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
+        f"Rules:\n"
+        f"- Return only the translated sentence. No commentary, no meta info.\n"
+        f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
+        f"- No thank yous, greetings, or filler.\n\n"
+        f"Sentence: {text}"
     )
-
 
     try:
         stream = await client.chat.completions.create(
@@ -154,6 +150,7 @@ async def stream_translate_with_gpt(websocket, text, source_lang, target_lang):
                 full += delta
                 await websocket.send_text(f"[STREAM]{full}")
         await websocket.send_text(f"[DONE]{full}")
+
     except Exception:
         await websocket.send_text("[DONE]")
 

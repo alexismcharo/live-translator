@@ -50,33 +50,36 @@
     async function startChunkRecorder() {
       return new Promise((resolve) => {
         mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+
         mediaRecorder.ondataavailable = async (e) => {
-          if (e.data && e.data.size > 0 && socket.readyState === WebSocket.OPEN) {
+          if (e.data && e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
             const buffer = await e.data.arrayBuffer();
             socket.send(buffer);
           }
           resolve();
         };
+
         mediaRecorder.start();
+
         setTimeout(() => {
           if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-        }, 3000);  // Reduced chunk time
+        }, 1800); // shorter chunks
       });
     }
 
     async function loopRecorder() {
       while (recordingActive) {
-        await startChunkRecorder();
-        await new Promise(r => setTimeout(r, 100));
+        await startChunkRecorder(); // no extra delay
       }
     }
 
     startBtn.onclick = async () => {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true }); // get mic early
+
       socket = new WebSocket("ws://34.69.242.211:8000/ws");
 
-      socket.onopen = async () => {
+      socket.onopen = () => {
         socket.send(JSON.stringify({ direction: directionSelect.value }));
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         recordingActive = true;
         loopRecorder();
 
@@ -97,14 +100,18 @@
             output.innerHTML = "";
             output.appendChild(activeLine);
           }
-          activeLine.textContent = text + " ▌";
+          requestAnimationFrame(() => {
+            activeLine.textContent = text + " ▌";
+          });
         } else if (data.startsWith("[DONE]")) {
           const finalText = data.replace("[DONE]", "");
           if (finalText) {
-            activeLine.textContent = finalText;
-            activeLine.classList.remove("italic", "text-gray-300");
-            activeLine.classList.add("text-white");
-            activeLine = null;
+            requestAnimationFrame(() => {
+              activeLine.textContent = finalText;
+              activeLine.classList.remove("italic", "text-gray-300");
+              activeLine.classList.add("text-white");
+              activeLine = null;
+            });
           }
         }
       };
