@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid, deepl
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -6,7 +6,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
+deepl_auth_key = os.getenv("DEEPL_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
+translator = deepl.Translator(deepl_auth_key)
 
 try:
     subprocess.run([
@@ -17,7 +19,6 @@ try:
 except:
     pass
 
-# optimized for T4 GPU
 model = whisper.load_model("large-v3")
 
 try:
@@ -130,7 +131,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # filter known thank-you phrases
+                    # filter thank-you phrases
                     text_lower = text.lower()
                     if (
                         "thank you" in text_lower
@@ -142,7 +143,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
 
-                    # GPT-based hallucination filter
+                    # hallucination check
                     if await hallucination_check(text):
                         print("🧠 GPT flagged as hallucination:", text)
                         continue
@@ -154,7 +155,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     translated = await translate_text(text, source_lang, target_lang)
                     await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
-                    # update previous translation using new context
+                    # update previous with new context
                     if len(transcript_history) >= 2:
                         prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                         improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
@@ -164,44 +165,66 @@ async def websocket_endpoint(websocket: WebSocket):
         print("❌ WebSocket error:", e)
         await websocket.close()
 
-# main translation function with optional refinement mode
+# GPT + DeepL translation combo
 async def translate_text(text, source_lang, target_lang, mode="default"):
-    if mode == "context":
-        previous, current = text
-        prompt = (
-            f"You are a strict, literal translation engine. Refine the translation of the previous sentence based on new context.\n\n"
-            f"Previous: {previous}\n"
-            f"Current: {current}\n\n"
-            f"Rules:\n"
-            f"- Do NOT repeat previous sentences unless their meaning changes.\n"
-            f"- Merge or rephrase ONLY if new information adds clarity.\n"
-            f"- Return the improved translation of the 'Previous' sentence only.\n"
-            f"- Do NOT repeat phrases that were already translated unless absolutely necessary.\n"
-            f"- If a sentence is identical or near-identical to the previous one, translate it only once.\n"
-        )
-    else:
-        prompt = (
-            f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
-            f"Rules:\n"
-            f"- Return only the translated sentence. No commentary, no meta info.\n"
-            f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
-            f"- No thank yous, greetings, or filler.\n\n"
-            f"Sentence: {text}"
-        )
-
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a strict and literal translator."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=60
-        )
-        return response.choices[0].message.content.strip()
+        if mode == "context":
+            previous, current = text
+            prompt = (
+                f"You are a strict, literal translation engine. Refine the translation of the previous sentence based on new context.\n\n"
+                f"Previous: {previous}\n"
+                f"Current: {current}\n\n"
+                f"Rules:\n"
+                f"- Do NOT repeat previous sentences unless their meaning changes.\n"
+                f"- Merge or rephrase ONLY if new information adds clarity.\n"
+                f"- Return the improved translation of the 'Previous' sentence only.\n"
+                f"- Do NOT repeat phrases that were already translated unless absolutely necessary.\n"
+                f"- If a sentence is identical or near-identical to the previous one, translate it only once.\n"
+            )
+            refined = await call_gpt(prompt)
+        else:
+            prompt = (
+                f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
+                f"Rules:\n"
+                f"- Return only the translated sentence. No commentary, no meta info.\n"
+                f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
+                f"- No thank yous, greetings, or filler.\n\n"
+                f"Sentence: {text}"
+            )
+            refined = await call_gpt(prompt)
+        
+        final = await translate_with_deepl(refined, source_lang, target_lang)
+        return final
+
     except Exception as e:
         print("❌ Translation error:", e)
+        return text
+
+# call OpenAI GPT-4o
+async def call_gpt(prompt):
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are a strict and literal translator."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.2,
+        max_tokens=60
+    )
+    return response.choices[0].message.content.strip()
+
+# use DeepL to polish the translation
+async def translate_with_deepl(text, source_lang, target_lang):
+    try:
+        result = translator.translate_text(
+            text,
+            source_lang="EN" if source_lang == "English" else "JA",
+            target_lang="JA" if target_lang == "Japanese" else "EN",
+            formality="default"
+        )
+        return result.text
+    except Exception as e:
+        print("❌ DeepL translation failed:", e)
         return text
 
 if __name__ == "__main__":
