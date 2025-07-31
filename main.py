@@ -49,12 +49,12 @@ async def hallucination_check(text):
             "- 'Click the bell icon'\n"
             "- 'See you in the next video'\n"
             "- 'Like and share'\n\n"
-            "If the sentence contains any such content, return only: YES\nOtherwise: NO\n\n"
+            "ONLY return:\nYES — if it's a known filler phrase\nNO — if it's natural speech, even if vague or uncertain\n\n"
             f"Sentence:\n{text}"
         )
 
         result = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": "You judge if the sentence is hallucinated filler. Only reply YES or NO."},
                 {"role": "user", "content": prompt}
@@ -218,7 +218,7 @@ async def translate_with_deepl(text, source_lang, target_lang):
     try:
         result = translator.translate_text(
             text,
-            source_lang="EN-GB" if source_lang == "English" else "JA",
+            source_lang="EN" if source_lang == "English" else "JA",
             target_lang="JA" if target_lang == "Japanese" else "EN-GB",
             formality="default"
         )
