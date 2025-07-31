@@ -218,8 +218,8 @@ async def translate_with_deepl(text, source_lang, target_lang):
     try:
         result = translator.translate_text(
             text,
-            source_lang="EN" if source_lang == "English" else "JA",
-            target_lang="JA" if target_lang == "Japanese" else "EN",
+            source_lang="EN-GB" if source_lang == "English" else "JA",
+            target_lang="JA" if target_lang == "Japanese" else "EN-GB",
             formality="default"
         )
         return result.text
