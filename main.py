@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid, deepl
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -6,9 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
-deepl_auth_key = os.getenv("DEEPL_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
-translator = deepl.Translator(deepl_auth_key)
 
 try:
     subprocess.run([
@@ -22,7 +20,7 @@ except:
 model = whisper.load_model("large-v3")
 
 try:
-    model.transcribe("warmup.wav", language="en", fp16=True)
+    model.transcribe("/tmp/warm.wav", language="en", fp16=True)
 except:
     pass
 
@@ -38,7 +36,7 @@ transcript_history = []  # [(segment_id, original_text)]
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
-# hallucination filter via GPT
+# hallucination filter via GPT-4o
 async def hallucination_check(text):
     try:
         prompt = (
@@ -76,9 +74,9 @@ async def websocket_endpoint(websocket: WebSocket):
         config = json.loads(settings)
         direction = config.get("direction")
         if direction == "en-ja":
-            source_lang, target_lang = "English", "Japanese"
+            spoof_language = "ja"  # the hack: lie to Whisper about input
         elif direction == "ja-en":
-            source_lang, target_lang = "Japanese", "English"
+            spoof_language = "en"
         else:
             await websocket.close()
             return
@@ -121,9 +119,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         condition_on_previous_text=True,
                         hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
-                        language="en" if source_lang == "English" else "ja",
+                        language=spoof_language,
                         compression_ratio_threshold=2.4,
-                        logprob_threshold=-1.0
+                        logprob_threshold=-1.0,
+                        task="translate"
                     )
 
                     text = result["text"].strip()
@@ -148,84 +147,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("🧠 GPT flagged as hallucination:", text)
                         continue
 
-                    # assign ID and translate
+                    # assign ID and send result
                     segment_id = str(uuid.uuid4())
                     transcript_history.append((segment_id, text))
-
-                    translated = await translate_text(text, source_lang, target_lang)
-                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
-
-                    # update previous with new context
-                    if len(transcript_history) >= 2:
-                        prev, curr = transcript_history[-2][1], transcript_history[-1][1]
-                        improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
+                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': text})}")
 
     except Exception as e:
         print("❌ WebSocket error:", e)
         await websocket.close()
-
-# GPT + DeepL translation combo
-async def translate_text(text, source_lang, target_lang, mode="default"):
-    try:
-        if mode == "context":
-            previous, current = text
-            prompt = (
-                f"You are a strict, literal translation engine. Refine the translation of the previous sentence based on new context.\n\n"
-                f"Previous: {previous}\n"
-                f"Current: {current}\n\n"
-                f"Rules:\n"
-                f"- Do NOT repeat previous sentences unless their meaning changes.\n"
-                f"- Merge or rephrase ONLY if new information adds clarity.\n"
-                f"- Return the improved translation of the 'Previous' sentence only.\n"
-                f"- Do NOT repeat phrases that were already translated unless absolutely necessary.\n"
-                f"- If a sentence is identical or near-identical to the previous one, translate it only once.\n"
-            )
-            refined = await call_gpt(prompt)
-        else:
-            prompt = (
-                f"You are a strict, literal translation engine. Translate the sentence below from {source_lang} to {target_lang}.\n\n"
-                f"Rules:\n"
-                f"- Return only the translated sentence. No commentary, no meta info.\n"
-                f"- Never say 'already in English/Japanese'. If it's already translated, return it as-is.\n"
-                f"- No thank yous, greetings, or filler.\n\n"
-                f"Sentence: {text}"
-            )
-            refined = await call_gpt(prompt)
-        
-        final = await translate_with_deepl(refined, source_lang, target_lang)
-        return final
-
-    except Exception as e:
-        print("❌ Translation error:", e)
-        return text
-
-# call OpenAI GPT-4o
-async def call_gpt(prompt):
-    response = await client.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "You are a strict and literal translator."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2,
-        max_tokens=60
-    )
-    return response.choices[0].message.content.strip()
-
-# use DeepL to polish the translation
-async def translate_with_deepl(text, source_lang, target_lang):
-    try:
-        result = translator.translate_text(
-            text,
-            source_lang="EN" if source_lang == "English" else "JA",
-            target_lang="JA" if target_lang == "Japanese" else "EN-GB",
-            formality="default"
-        )
-        return result.text
-    except Exception as e:
-        print("❌ DeepL translation failed:", e)
-        return text
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
