@@ -15,13 +15,14 @@ model = whisper.load_model("large-v3")
 
 # Load DeepSeek R1 (chat model) with proper trust_remote_code
 device = "cuda" if torch.cuda.is_available() else "cpu"
-deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-moe-16b-chat", trust_remote_code=True)
+deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-coder-6.7b-instruct", trust_remote_code=True)
 deepseek_model = AutoModelForCausalLM.from_pretrained(
-    "deepseek-ai/deepseek-moe-16b-chat",
-    trust_remote_code=True,  # Fix: allow loading custom code for this model
+    "deepseek-ai/deepseek-coder-6.7b-instruct",
+    trust_remote_code=True,
     torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
     device_map="auto"
 )
+
 
 # === FastAPI Setup ===
 app = FastAPI()
