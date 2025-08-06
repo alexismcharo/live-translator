@@ -4,4 +4,5 @@ openai
 openai-whisper
 python-dotenv
 ffmpeg-python
-deepl
+transformers
+torch
