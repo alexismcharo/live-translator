@@ -2,7 +2,7 @@ import os, json, uuid, tempfile, subprocess, torch, whisper, uvicorn, openai
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from dotenv import load_dotenv
 
 # === ENV & MODELS ===
@@ -13,10 +13,14 @@ client = openai.AsyncOpenAI(api_key=api_key)
 # Load Whisper
 model = whisper.load_model("large-v3")
 
-# Load DeepSeek R1
+# Load DeepSeek R1 (chat model)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-translate", trust_remote_code=True)
-deepseek_model = AutoModelForSeq2SeqLM.from_pretrained("deepseek-ai/deepseek-translate", trust_remote_code=True).to(device)
+deepseek_tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/deepseek-moe-16b-chat", trust_remote_code=True)
+deepseek_model = AutoModelForCausalLM.from_pretrained(
+    "deepseek-ai/deepseek-moe-16b-chat",
+    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto"
+)
 
 # === FastAPI Setup ===
 app = FastAPI()
@@ -25,7 +29,7 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-transcript_history = []  # [(segment_id, original_text)]
+transcript_history = []
 
 # === Warmup ===
 try:
@@ -46,7 +50,6 @@ except:
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
-# === WebSocket Route ===
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -86,15 +89,10 @@ async def websocket_endpoint(websocket: WebSocket):
                             "-ar", "16000",
                             "-ac", "1",
                             wav.name
-                        ],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        check=True
-                        )
+                        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True)
                     except:
                         continue
 
-                    # Transcribe or Translate
                     if source_lang == "Japanese":
                         result = model.transcribe(
                             wav.name,
@@ -131,19 +129,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # Skip thank-you filler
                     text_lower = text.lower()
-                    if (
-                        "thank you" in text_lower
-                        or "thanks" in text_lower
-                        or "ありがとう" in text
-                        or "ありがとうございます" in text
-                        or "ありがと" in text
-                    ):
+                    if any(x in text_lower for x in ["thank you", "thanks"]) or "ありがとう" in text:
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
 
-                    # Hallucination check
                     if await hallucination_check(text):
                         print("🧠 GPT flagged as hallucination:", text)
                         continue
@@ -163,10 +153,9 @@ async def websocket_endpoint(websocket: WebSocket):
         print("❌ WebSocket error:", e)
         await websocket.close()
 
-# === Translation Pipeline: GPT + DeepSeek ===
 async def translate_text(text, source_lang, target_lang, mode="default"):
     try:
-        # Step 1: Contextual refinement via GPT-4o
+        # Step 1: Refine using GPT-4o
         if mode == "context":
             previous, current = text
             prompt = (
@@ -201,20 +190,25 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
         )
         refined_text = gpt_response.choices[0].message.content.strip()
 
-        # Step 2: Final polish via DeepSeek
-        prefix = "Translate English to Japanese: " if target_lang == "Japanese" else "Translate Japanese to English: "
-        input_text = prefix + refined_text
-        inputs = deepseek_tokenizer(input_text, return_tensors="pt", truncation=True, padding=True).to(device)
-        output_ids = deepseek_model.generate(**inputs, max_new_tokens=256)
-        output_text = deepseek_tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+        # Step 2: Final polish with DeepSeek R1
+        instruction = f"Translate this from {source_lang} to {target_lang}: \"{refined_text}\""
+        inputs = deepseek_tokenizer(instruction, return_tensors="pt").to(device)
+        outputs = deepseek_model.generate(
+            **inputs,
+            max_new_tokens=256,
+            do_sample=False,
+            temperature=0.7,
+            pad_token_id=deepseek_tokenizer.eos_token_id
+        )
+        output_text = deepseek_tokenizer.decode(outputs[0], skip_special_tokens=True)
+        output_text = output_text.replace(instruction, "").strip()
 
-        return output_text.strip()
+        return output_text
 
     except Exception as e:
         print("❌ Translation error:", e)
         return text
 
-# === GPT-based Hallucination Filter ===
 async def hallucination_check(text):
     try:
         prompt = (
@@ -242,6 +236,5 @@ async def hallucination_check(text):
     except:
         return False
 
-# === App Runner ===
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
