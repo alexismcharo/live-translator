@@ -163,7 +163,7 @@ async def hallucination_check(text: str) -> bool:
         )
 
         result = await client.chat.completions.create(
-            model="gpt-5-nano",  
+            model="gpt-5-nano",
             messages=[
                 {"role": "system", "content": "Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
                 {"role": "user", "content": prompt}
@@ -345,18 +345,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 with open(raw_path, "wb") as f:
                     f.write(audio)
 
-                try:
-                    subprocess.run(
-                        [
-                            "ffmpeg", "-y",
-                            "-i", raw_path,
-                            "-af", "silenceremove=1:0:-40dB",
-                            "-ar", "16000", "-ac", "1",
-                            wav_path
-                        ],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True
-                    )
-                except Exception:
+                # Transcode WITHOUT silenceremove; log errors if any
+                p = subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", raw_path,
+                        "-ar", "16000",
+                        "-ac", "1",
+                        wav_path
+                    ],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+                )
+                if p.returncode != 0:
+                    err = p.stderr.decode("utf-8", errors="ignore")
+                    print("ffmpeg error:", err[:500])
                     continue
 
                 try:

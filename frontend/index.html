@@ -57,7 +57,6 @@
     // Derived WS URL (works in http and https)
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      // if you must target a fixed host/port, change the next line:
       return `${proto}://${location.host}/ws`;
     }
 
@@ -86,7 +85,6 @@
     }
 
     function appendFinalTextToRollingParagraph(text) {
-      // rolling paragraph for new finals (no id yet): use a special "current" block
       let p = output.querySelector(".paragraph.current");
       if (!p) {
         p = document.createElement("div");
@@ -156,13 +154,11 @@
         if (data.startsWith("[DONE]")) {
           const payload = JSON.parse(data.replace("[DONE]", ""));
           const { id, text } = payload;
-          // finalize streaming line into a paragraph (with id)
           clearActivePartial();
           if (id && text) {
             const para = ensureParagraphFor(id, "");
             para.textContent = text;
           } else if (text) {
-            // if no id provided, append to rolling paragraph
             appendFinalTextToRollingParagraph(text);
           }
           return;
@@ -209,26 +205,12 @@
           socket.send(JSON.stringify({ direction: directionSelect.value }));
           recording = true;
           setButtons(true);
-
-          // Start a single recorder and emit chunks every 800ms
-          mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
-          mediaRecorder.ondataavailable = async (e) => {
-            if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
-              try {
-                const buf = await e.data.arrayBuffer();
-                socket.send(buf);
-              } catch (err) {
-                console.warn("send buffer error:", err);
-              }
-            }
-          };
-          mediaRecorder.start(800); // timeslice ms — small, steady chunks
+          recordLoop(mimeType);   // 3.2s chunk loop
         };
 
         socket.onmessage = (event) => handleMessage(event.data);
 
         socket.onclose = () => {
-          // Clean UI states on close
           clearActivePartial();
           clearAsrPartial();
           setButtons(false);
@@ -241,6 +223,31 @@
       } catch (err) {
         console.error("Error starting recording:", err);
         stopRecording();
+      }
+    }
+
+    async function recordLoop(mimeType) {
+      while (recording) {
+        const recorder = new MediaRecorder(mediaStream, { mimeType });
+
+        recorder.ondataavailable = async (e) => {
+          if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
+            try {
+              const buf = await e.data.arrayBuffer();
+              socket.send(buf);
+            } catch (err) {
+              console.warn("send buffer error:", err);
+            }
+          }
+        };
+
+        recorder.start();  // no timeslice — control duration manually
+        await new Promise((resolve) => {
+          setTimeout(() => {
+            try { recorder.stop(); } catch {}
+            resolve();
+          }, 3200);        // 3.2s chunks
+        });
       }
     }
 
