@@ -1,38 +1,31 @@
-# Base image with PyTorch + CUDA support
-FROM pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime
+# ---------- GPU (CUDA 12.1) ----------
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
-# Set working directory
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    UVICORN_HOST=0.0.0.0 \
+    UVICORN_PORT=8000
+
+# OS deps: Python, pip, ffmpeg (needed by whisper)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv python3-pip ffmpeg ca-certificates curl \
+ && ln -s /usr/bin/python3.11 /usr/local/bin/python \
+ && python -m pip install --upgrade pip \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Set environment variables for Hugging Face + temp cache
-ENV HF_HOME=/opt/hf-cache
-ENV TRANSFORMERS_CACHE=/opt/hf-cache
-ENV TMPDIR=/opt/tmp
+# Install Torch with CUDA first (match CUDA 12.1 base)
+RUN python -m pip install --no-cache-dir \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Prevent tzdata prompt + install needed system packages
-RUN ln -fs /usr/share/zoneinfo/Etc/UTC /etc/localtime && \
-    echo "Etc/UTC" > /etc/timezone && \
-    DEBIAN_FRONTEND=noninteractive apt-get update && \
-    apt-get install -y --no-install-recommends \
-    tzdata ffmpeg git curl && \
-    dpkg-reconfigure --frontend noninteractive tzdata && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Create and own cache directories
-RUN mkdir -p /opt/hf-cache /opt/tmp && \
-    chmod -R 777 /opt/hf-cache /opt/tmp
-
-# Install Python dependencies
+# Then the rest
 COPY requirements.txt .
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN python -m pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# Add app
 COPY . .
 
-# Expose FastAPI default port
+# Expose & run
 EXPOSE 8000
-
-# Run the FastAPI app
-CMD ["python", "main.py"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

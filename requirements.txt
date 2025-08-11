@@ -1,10 +1,14 @@
-fastapi
-uvicorn[standard]
-openai
-openai-whisper
-python-dotenv
-ffmpeg-python
-accelerate
-transformers==4.41.2
-safetensors==0.4.2
+# ASGI & web
+fastapi>=0.111
+uvicorn[standard]>=0.30
 
+# OpenAI API (uses AsyncOpenAI)
+openai>=1.30
+
+# Whisper (OpenAI’s)
+openai-whisper>=20231117
+
+# Utils
+python-dotenv>=1.0
+
+tqdm>=4.66

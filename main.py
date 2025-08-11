@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 import time
+import asyncio
 import tempfile
 import subprocess
 from collections import deque
@@ -52,19 +53,68 @@ app.add_middleware(
 transcript_history = deque(maxlen=500)  # [(segment_id, original_text)]
 
 # --- Debounce helpers ---------------------------------------------------------
-LAST_AUDIO_TS = time.monotonic()  # updated on each received audio frame
-DEBOUNCE_SEC = 0.30               # 300ms trailing quiet before we consider a segment "ready"
+LAST_AUDIO_TS = time.monotonic()   # updated on each received audio frame
+DEBOUNCE_SEC = 0.30                # min trailing quiet before "ready"
+INACTIVITY_FLUSH_SEC = 0.60        # finalize if quiet for this long
+
+# pending ASR buffer (finalize on inactivity)
+_pending_text = ""
+_pending_lock = asyncio.Lock()
+_pending_task = None
 
 def segment_ready(text: str, now_ts: float, last_ts: float) -> bool:
-    """Return True if we've had enough trailing quiet and content is long enough."""
-    quiet_enough = (now_ts - last_ts) >= DEBOUNCE_SEC
-    # "long enough": ≥6 ascii chars OR contains jp punctuation OR ≥4 CJK chars
+    """True if we've had enough trailing quiet and content is long enough."""
+    quiet = now_ts - last_ts
+    # allow shorter segments if we've been quiet a bit longer
+    short_and_quiet = (len(text) >= 3) and (quiet >= 0.50)
+    # "long enough": ≥6 ascii OR jp punctuation OR ≥3 CJK OR short-but-quiet
     long_enough = (
         len(text) >= 6
         or any(p in text for p in "。！？!?、")
-        or sum(1 for c in text if ord(c) >= 0x4E00) >= 4
+        or sum(1 for c in text if ord(c) >= 0x4E00) >= 3
+        or short_and_quiet
     )
-    return quiet_enough and long_enough
+    return (quiet >= DEBOUNCE_SEC) and long_enough
+
+def set_pending_text(t: str):
+    global _pending_text
+    _pending_text = t
+
+async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, target_lang: str):
+    """Start/restart a timer that finalizes pending ASR if the mic is quiet."""
+    global _pending_task
+
+    # cancel previous flush timer if any
+    if _pending_task and not _pending_task.done():
+        _pending_task.cancel()
+
+    async def _flush_when_quiet():
+        try:
+            await asyncio.sleep(INACTIVITY_FLUSH_SEC)
+            quiet = time.monotonic() - LAST_AUDIO_TS
+            if quiet < INACTIVITY_FLUSH_SEC:
+                return  # not quiet long enough
+            async with _pending_lock:
+                text = _pending_text.strip()
+                if not text:
+                    return
+                # clear pending before we emit
+                set_pending_text("")
+            # finalize → translate
+            segment_id = str(uuid.uuid4())
+            transcript_history.append((segment_id, text))
+            final_translation = await stream_translate(websocket, text, source_lang, target_lang)
+            await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
+
+            # context refine previous
+            if len(transcript_history) >= 2:
+                prev, curr = transcript_history[-2][1], transcript_history[-1][1]
+                improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
+                await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved}, ensure_ascii=False)}")
+        except asyncio.CancelledError:
+            pass
+
+    _pending_task = asyncio.create_task(_flush_when_quiet())
 
 # --- GPT hallucination/CTA filter --------------------------------------------
 async def hallucination_check(text: str) -> bool:
@@ -113,7 +163,7 @@ async def hallucination_check(text: str) -> bool:
         )
 
         result = await client.chat.completions.create(
-            model="gpt-5-nano",  # bump to gpt-5-mini if you need more nuance
+            model="gpt-5-nano",  
             messages=[
                 {"role": "system", "content": "Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
                 {"role": "user", "content": prompt}
@@ -235,7 +285,7 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
             s = "".join(partial_buf)
 
             now = time.monotonic()
-            # flush policy: punctuation boundary OR 180ms elapsed OR ≥8 (space-delimited) tokens
+            # flush policy: punctuation boundary OR 180ms elapsed OR ≥8 tokens
             boundary = s.endswith(("。", "、", ".", "!", "?", "！", "？"))
             elapsed = (now - last_flush) > 0.18
             tokish = (len(s.split()) >= 8)
@@ -345,11 +395,19 @@ async def websocket_endpoint(websocket: WebSocket):
             # debounce + min-length gate
             now_ts = time.monotonic()
             if not segment_ready(text, now_ts, LAST_AUDIO_TS):
-                # Not "stable" yet; send a soft partial echo so UI can show pending STT if you like
+                # show ASR partial
                 await websocket.send_text(f"[PARTIAL_ASR]{json.dumps({'text': text}, ensure_ascii=False)}")
+                # remember pending and schedule a quiet-time flush
+                async with _pending_lock:
+                    set_pending_text(text)
+                await _schedule_inactivity_flush(websocket, source_lang, target_lang)
                 continue
+            else:
+                # clear pending if we consider it ready now
+                async with _pending_lock:
+                    set_pending_text("")
 
-            # assign ID and stream-translate
+            # assign ID and stream-translate immediately
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
 
