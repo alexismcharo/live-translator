@@ -6,16 +6,15 @@
   <title>Socious Translator</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    body {
-      font-family: 'Inter', 'Helvetica Neue', sans-serif;
-    }
+    body { font-family: 'Inter', 'Helvetica Neue', sans-serif; }
+    .caret::after { content: ' ▌'; opacity: 0.6; }
   </style>
 </head>
 <body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-start p-6 space-y-10">
 
   <h1 class="text-3xl font-bold tracking-tight text-center">Socious Translator</h1>
 
-  <!-- 🔝 Top Control Section -->
+  <!-- Controls -->
   <div class="w-full max-w-3xl bg-[#1A1A1C] rounded-2xl p-6 shadow-lg flex flex-col items-center space-y-6">
     <div class="w-full flex flex-col lg:flex-row lg:items-end lg:justify-center lg:gap-6 space-y-4 lg:space-y-0">
       <div class="flex flex-col w-full lg:w-auto items-center">
@@ -25,7 +24,6 @@
           <option value="ja-en">Japanese → English</option>
         </select>
       </div>
-
       <div class="flex flex-col sm:flex-row gap-4">
         <button id="startBtn" class="bg-gray-700 hover:bg-gray-600 text-white font-semibold px-6 py-2 rounded transition-all">Start Recording</button>
         <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">Stop Recording</button>
@@ -33,7 +31,7 @@
     </div>
   </div>
 
-  <!-- 📝 Output Text Area -->
+  <!-- Output -->
   <div class="w-full max-w-4xl flex flex-col space-y-6 items-center">
     <div class="w-full">
       <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-tight tracking-wide min-h-[160px] w-full"></div>
@@ -46,114 +44,227 @@
     const output = document.getElementById("output");
     const directionSelect = document.getElementById("direction");
 
-    let stream = null;
+    let mediaStream = null;
+    let mediaRecorder = null;
     let socket = null;
     let recording = false;
-    let activeLine = null;
+
+    // UI state
+    let activePartialEl = null;     // current streaming translation line
+    let activeAsrEl = null;         // optional ASR partial echo line
+    const paragraphs = new Map();   // id -> paragraph element (for [UPDATE])
+
+    // Derived WS URL (works in http and https)
+    function wsUrl() {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      // if you must target a fixed host/port, change the next line:
+      return `${proto}://${location.host}/ws`;
+    }
 
     directionSelect.onchange = () => stopRecording();
 
-    async function startRecording() {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        socket = new WebSocket("ws://34.170.238.32:8000/ws");
+    function setButtons(running) {
+      startBtn.disabled = running;
+      stopBtn.disabled = !running;
+      startBtn.classList.toggle("opacity-50", running);
+      startBtn.classList.toggle("cursor-not-allowed", running);
+      stopBtn.classList.toggle("opacity-50", !running);
+      stopBtn.classList.toggle("cursor-not-allowed", !running);
+    }
 
-        socket.onopen = () => {
-          socket.send(JSON.stringify({ direction: directionSelect.value }));
-          recording = true;
-          recordLoop();
+    function ensureParagraphFor(id, initialText = "") {
+      let p = paragraphs.get(id);
+      if (!p) {
+        p = document.createElement("div");
+        p.className = "paragraph text-white";
+        p.dataset.id = id;
+        p.textContent = initialText;
+        output.appendChild(p);
+        paragraphs.set(id, p);
+      }
+      return p;
+    }
 
-          startBtn.disabled = true;
-          stopBtn.disabled = false;
-          startBtn.classList.add("opacity-50", "cursor-not-allowed");
-          stopBtn.classList.remove("opacity-50", "cursor-not-allowed");
-        };
+    function appendFinalTextToRollingParagraph(text) {
+      // rolling paragraph for new finals (no id yet): use a special "current" block
+      let p = output.querySelector(".paragraph.current");
+      if (!p) {
+        p = document.createElement("div");
+        p.className = "paragraph current text-white";
+        output.appendChild(p);
+      }
+      p.textContent += (p.textContent && !p.textContent.endsWith(" ") ? " " : "") + text;
 
-        socket.onmessage = (event) => {
-          const data = event.data;
-
-          let paragraphDiv = output.querySelector(".paragraph");
-          if (!paragraphDiv) {
-            paragraphDiv = document.createElement("div");
-            paragraphDiv.className = "paragraph text-white";
-            paragraphDiv.dataset.final = "true";
-            output.appendChild(paragraphDiv);
-          }
-
-          if (data.startsWith("[STREAM]")) {
-            const text = data.replace("[STREAM]", "");
-            if (!activeLine) {
-              activeLine = document.createElement("div");
-              activeLine.className = "text-gray-300 italic";
-              output.appendChild(activeLine);
-            }
-            requestAnimationFrame(() => {
-              activeLine.textContent = text + " ▌";
-            });
-          } else if (data.startsWith("[DONE]")) {
-            const payload = JSON.parse(data.replace("[DONE]", ""));
-            const { text } = payload;
-
-            if (text && paragraphDiv) {
-              requestAnimationFrame(() => {
-                // Append new text
-                paragraphDiv.textContent += (paragraphDiv.textContent.endsWith(" ") ? "" : " ") + text;
-
-                // Trim to max characters
-                const maxChars = 350;
-                if (paragraphDiv.textContent.length > maxChars) {
-                  const words = paragraphDiv.textContent.trim().split(" ");
-                  while (paragraphDiv.textContent.length > maxChars && words.length > 1) {
-                    words.shift();
-                    paragraphDiv.textContent = words.join(" ");
-                  }
-                }
-
-                // Clean up active line
-                if (activeLine) {
-                  output.removeChild(activeLine);
-                  activeLine = null;
-                }
-              });
-            }
-          }
-        };
-      } catch (err) {
-        console.error("Error:", err);
+      // trim rolling text to max chars
+      const maxChars = 350;
+      if (p.textContent.length > maxChars) {
+        const words = p.textContent.trim().split(/\s+/);
+        while (p.textContent.length > maxChars && words.length > 1) {
+          words.shift();
+          p.textContent = words.join(" ");
+        }
       }
     }
 
-    async function recordLoop() {
-      while (recording) {
-        const mimeType = "audio/webm";
-        const recorder = new MediaRecorder(stream, { mimeType });
+    function setActivePartial(text) {
+      if (!activePartialEl) {
+        activePartialEl = document.createElement("div");
+        activePartialEl.className = "text-gray-300 italic caret";
+        output.appendChild(activePartialEl);
+      }
+      activePartialEl.textContent = text;
+    }
 
-        recorder.ondataavailable = async (e) => {
-          if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
-            const buffer = await e.data.arrayBuffer();
-            socket.send(buffer);
+    function clearActivePartial() {
+      if (activePartialEl?.parentNode) activePartialEl.parentNode.removeChild(activePartialEl);
+      activePartialEl = null;
+    }
+
+    function setAsrPartial(text) {
+      if (!activeAsrEl) {
+        activeAsrEl = document.createElement("div");
+        activeAsrEl.className = "text-gray-500 text-xl italic";
+        output.appendChild(activeAsrEl);
+      }
+      activeAsrEl.textContent = text;
+    }
+
+    function clearAsrPartial() {
+      if (activeAsrEl?.parentNode) activeAsrEl.parentNode.removeChild(activeAsrEl);
+      activeAsrEl = null;
+    }
+
+    function handleMessage(data) {
+      try {
+        if (data.startsWith("[PARTIAL_ASR]")) {
+          const payload = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
+          setAsrPartial(payload.text || "");
+          return;
+        }
+        if (data.startsWith("[PARTIAL]")) {
+          const payload = JSON.parse(data.replace("[PARTIAL]", ""));
+          clearAsrPartial();
+          setActivePartial(payload.text || "");
+          return;
+        }
+        if (data.startsWith("[FINAL]")) {
+          const payload = JSON.parse(data.replace("[FINAL]", ""));
+          clearAsrPartial();
+          if (payload.text) setActivePartial(payload.text);
+          return;
+        }
+        if (data.startsWith("[DONE]")) {
+          const payload = JSON.parse(data.replace("[DONE]", ""));
+          const { id, text } = payload;
+          // finalize streaming line into a paragraph (with id)
+          clearActivePartial();
+          if (id && text) {
+            const para = ensureParagraphFor(id, "");
+            para.textContent = text;
+          } else if (text) {
+            // if no id provided, append to rolling paragraph
+            appendFinalTextToRollingParagraph(text);
           }
+          return;
+        }
+        if (data.startsWith("[UPDATE]")) {
+          const payload = JSON.parse(data.replace("[UPDATE]", ""));
+          const { id, text } = payload;
+          if (id && paragraphs.has(id)) {
+            paragraphs.get(id).textContent = text || "";
+          }
+          return;
+        }
+        // Back-compat with old server messages:
+        if (data.startsWith("[STREAM]")) {
+          setActivePartial(data.replace("[STREAM]", ""));
+          return;
+        }
+      } catch (e) {
+        console.warn("Message parse error:", e);
+      }
+    }
+
+    async function startRecording() {
+      try {
+        // Choose a supported mime type
+        const preferred = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/ogg;codecs=opus"
+        ];
+        let mimeType = "";
+        for (const t of preferred) {
+          if (MediaRecorder.isTypeSupported(t)) { mimeType = t; break; }
+        }
+        if (!mimeType) {
+          alert("This browser doesn't support WebM/Opus recording.");
+          return;
+        }
+
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+        socket = new WebSocket(wsUrl());
+        socket.onopen = () => {
+          socket.send(JSON.stringify({ direction: directionSelect.value }));
+          recording = true;
+          setButtons(true);
+
+          // Start a single recorder and emit chunks every 800ms
+          mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+          mediaRecorder.ondataavailable = async (e) => {
+            if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
+              try {
+                const buf = await e.data.arrayBuffer();
+                socket.send(buf);
+              } catch (err) {
+                console.warn("send buffer error:", err);
+              }
+            }
+          };
+          mediaRecorder.start(800); // timeslice ms — small, steady chunks
         };
 
-        recorder.start();
-        await new Promise((resolve) => {
-          setTimeout(() => {
-            recorder.stop();
-            resolve();
-          }, 3200);
-        });
+        socket.onmessage = (event) => handleMessage(event.data);
+
+        socket.onclose = () => {
+          // Clean UI states on close
+          clearActivePartial();
+          clearAsrPartial();
+          setButtons(false);
+        };
+
+        socket.onerror = (e) => {
+          console.error("WebSocket error:", e);
+        };
+
+      } catch (err) {
+        console.error("Error starting recording:", err);
+        stopRecording();
       }
     }
 
     function stopRecording() {
       recording = false;
-      if (stream) stream.getTracks().forEach((t) => t.stop());
-      if (socket && socket.readyState === WebSocket.OPEN) socket.close();
 
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
-      startBtn.classList.remove("opacity-50", "cursor-not-allowed");
-      stopBtn.classList.add("opacity-50", "cursor-not-allowed");
+      try {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+      } catch {}
+      mediaRecorder = null;
+
+      try {
+        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+      } catch {}
+      mediaStream = null;
+
+      try {
+        if (socket && socket.readyState === WebSocket.OPEN) socket.close();
+      } catch {}
+      socket = null;
+
+      clearActivePartial();
+      clearAsrPartial();
+      setButtons(false);
     }
 
     startBtn.onclick = startRecording;
