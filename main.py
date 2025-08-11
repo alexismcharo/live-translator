@@ -19,29 +19,28 @@ load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# --- Warm FFMPEG and Whisper -------------------------------------------------
+# ---------------- Utilities ----------------
+def looks_japanese(s: str) -> bool:
+    # Hiragana 3040–309F, Katakana 30A0–30FF, Kanji 4E00–9FFF
+    return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in s or "")
+
+# ------------- Warm FFMPEG & Whisper --------------
 WARMUP_WAV = "/tmp/warm.wav"
 try:
     subprocess.run(
-        [
-            "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
-            "-t", "0.5", "-ar", "16000", "-ac", "1",
-            "-y", WARMUP_WAV
-        ],
+        ["ffmpeg","-f","lavfi","-i","anullsrc=r=16000:cl=mono","-t","0.5","-ar","16000","-ac","1","-y",WARMUP_WAV],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
     )
 except Exception:
     pass
 
-# Optimized for T4 GPU
 model = whisper.load_model("large-v3")
-
 try:
     model.transcribe(WARMUP_WAV, language="en", fp16=True)
 except Exception:
     pass
 
-# --- FastAPI -----------------------------------------------------------------
+# ---------------- FastAPI ----------------
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -49,15 +48,13 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# bounded to avoid unbounded growth
 transcript_history = deque(maxlen=500)  # [(segment_id, original_text)]
 
-# --- Debounce helpers ---------------------------------------------------------
-LAST_AUDIO_TS = time.monotonic()   # updated on each received audio frame
+# ---------------- Debounce / Flush ----------------
+LAST_AUDIO_TS = time.monotonic()   # updated when a blob arrives
 DEBOUNCE_SEC = 0.30                # min trailing quiet before "ready"
 INACTIVITY_FLUSH_SEC = 0.60        # finalize if quiet for this long
 
-# pending ASR buffer (finalize on inactivity)
 _pending_text = ""
 _pending_lock = asyncio.Lock()
 _pending_task = None
@@ -65,9 +62,7 @@ _pending_task = None
 def segment_ready(text: str, now_ts: float, last_ts: float) -> bool:
     """True if we've had enough trailing quiet and content is long enough."""
     quiet = now_ts - last_ts
-    # allow shorter segments if we've been quiet a bit longer
     short_and_quiet = (len(text) >= 3) and (quiet >= 0.50)
-    # "long enough": ≥6 ascii OR jp punctuation OR ≥3 CJK OR short-but-quiet
     long_enough = (
         len(text) >= 6
         or any(p in text for p in "。！？!?、")
@@ -78,13 +73,11 @@ def segment_ready(text: str, now_ts: float, last_ts: float) -> bool:
 
 def set_pending_text(t: str):
     global _pending_text
-    _pending_text = t
+    _pending_text = (t or "").strip()
 
 async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, target_lang: str):
     """Start/restart a timer that finalizes pending ASR if the mic is quiet."""
     global _pending_task
-
-    # cancel previous flush timer if any
     if _pending_task and not _pending_task.done():
         _pending_task.cancel()
 
@@ -93,19 +86,18 @@ async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, tar
             await asyncio.sleep(INACTIVITY_FLUSH_SEC)
             quiet = time.monotonic() - LAST_AUDIO_TS
             if quiet < INACTIVITY_FLUSH_SEC:
-                return  # not quiet long enough
+                return
             async with _pending_lock:
                 text = _pending_text.strip()
                 if not text:
                     return
-                # clear pending before we emit
                 set_pending_text("")
             # finalize → translate
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
             final_translation = await stream_translate(websocket, text, source_lang, target_lang)
+            print("✅ Final translation:", final_translation[:120])
             await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
-
             # context refine previous
             if len(transcript_history) >= 2:
                 prev, curr = transcript_history[-2][1], transcript_history[-1][1]
@@ -116,198 +108,126 @@ async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, tar
 
     _pending_task = asyncio.create_task(_flush_when_quiet())
 
-# --- GPT hallucination/CTA filter --------------------------------------------
+# ---------------- Hallucination filter ----------------
 async def hallucination_check(text: str) -> bool:
-    """
-    Conservative filler/CTA detector.
-    Returns True only if the string is clearly a stock outro/CTA-style filler.
-    Unknown or ambiguous phrases default to NO (i.e., False).
-    """
     try:
         prompt = (
             "You are a strict, conservative classifier for filler/CTA phrases.\n"
-            "Task: Decide if the sentence is a generic, stock, AI-ish filler line commonly used as video/podcast/stream outros or engagement CTAs.\n\n"
-            "Positive categories (say YES only if a clear match or close paraphrase):\n"
-            "- Thanks/see-you outros (e.g., 'Thanks for watching', 'See you in the next video').\n"
-            "- Engagement CTAs (e.g., 'Like and subscribe', 'Hit the bell', 'Share with your friends').\n"
-            "- Follow/subscribe requests across platforms (e.g., 'Follow me on X/Instagram', 'Subscribe for more').\n"
-            "- Generic sign-offs with no content (e.g., 'That's all for today', 'Stay tuned for more').\n\n"
-            "Negative indicators (say NO):\n"
-            "- Any sentence containing specific information, claims, instructions, or context (facts, names, numbers, steps, dates, product features, agendas).\n"
-            "- Opinions about content, analysis, or summaries that reference specifics.\n"
-            "- Sponsor reads or calls-to-action that include concrete details (codes, URLs, product names) → NO unless the entire line is a bare generic CTA.\n"
-            "- Greetings/intros ('Hi everyone, welcome back') → NO (not an outro/engagement CTA).\n\n"
-            "Decision rules:\n"
-            "- Be conservative: if unfamiliar, ambiguous, or partly specific → NO.\n"
-            "- Only YES if the sentence fits a Positive category without additional specific content.\n"
-            "- Language-agnostic: if not in English, judge by meaning; still output YES/NO in English.\n"
-            "- Output EXACTLY 'YES' or 'NO'. No punctuation or extra words.\n\n"
-            "Positive examples (YES):\n"
-            "- Thanks for watching\n"
-            "- Don't forget to subscribe\n"
-            "- Click the bell icon\n"
-            "- See you in the next video\n"
-            "- Like and share\n"
-            "- Follow me for more\n"
-            "- That's all for today\n"
-            "- Subscribe for more content\n\n"
-            "Negative examples (NO):\n"
-            "- In 2024, we grew revenue by 18% across APAC.\n"
-            "- Click the link in the description to access the dataset we covered today (v3.2, updated May 5).\n"
-            "- Thanks to Acme Corp for sponsoring this episode with code ACME20.\n"
-            "- We'll compare BERT and GPT architectures focusing on attention mechanisms.\n"
-            "- お時間ある方は資料の3ページ目をご確認ください。\n"
-            "- 次回は6月15日に大阪でワークショップを開催します。\n\n"
-            "Answer strictly with YES or NO.\n\n"
-            f"Sentence:\n{text}"
+            "Say YES only for generic outros/engagement CTAs; otherwise NO.\n"
+            "Output YES or NO only.\n\nSentence:\n" + text
         )
-
-        result = await client.chat.completions.create(
+        res = await client.chat.completions.create(
             model="gpt-5-nano",
             messages=[
-                {"role": "system", "content": "Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
-                {"role": "user", "content": prompt}
+                {"role":"system","content":"Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
+                {"role":"user","content":prompt}
             ],
-            temperature=0,
-            top_p=0,
-            max_tokens=1
+            temperature=0, top_p=0, max_tokens=1
         )
-        return result.choices[0].message.content.strip().upper() == "YES"
+        return (res.choices[0].message.content or "").strip().upper() == "YES"
     except Exception:
         return False
 
-# --- Natural translation (non-streaming; used for context-refine) -------------
+# ---------------- Translation (strict JP enforcement) ----------------
 async def translate_text(text, source_lang: str, target_lang: str, mode: str = "default"):
-    """
-    Bidirectional EN↔JA translation with optional context refinement.
-    - mode="default": one-shot natural translation
-    - mode="context": refine translation of the PREVIOUS sentence using the NEW sentence
-    """
     system_prompt = (
-        f"You are a professional bidirectional {source_lang} ↔ {target_lang} translator and simultaneous interpreter.\n"
-        f"Goals: produce natural, fluent, culturally appropriate {target_lang}; preserve meaning, tone, and intent; keep terminology consistent across turns.\n\n"
-        f"Policy:\n"
-        f"- Output ONLY the translation in {target_lang} (no quotes, no commentary).\n"
-        f"- If input is already in {target_lang}, return it unchanged.\n"
-        f"- Preserve proper names, numbers, and units; use established translations when widely known.\n"
-        f"- Prefer idiomatic equivalents over literal calques.\n"
-        f"- Handle partial or interrupted speech gracefully; produce the most natural fragment possible.\n\n"
-        f"When translating INTO Japanese:\n"
-        f"- Default to polite です・ます unless the source is clearly casual or quoted; keep honorifics/titles; omit pronouns when natural; use Japanese punctuation; transliterate unknown names inカタカナ.\n\n"
-        f"When translating INTO English:\n"
-        f"- Use idiomatic, concise phrasing; make implicit subjects explicit when needed; avoid awkward literalness."
+        f"You are a professional {source_lang}↔{target_lang} translator.\n"
+        f"- Output ONLY in {target_lang}. No quotes, no commentary.\n"
+        f"- If translating INTO Japanese, write in kanji/kana (no romaji, no English)."
     )
-
     if mode == "context":
         previous, current = text
         user_prompt = (
             f"Refine the translation of the PREVIOUS sentence using the NEW sentence as context.\n\n"
             f"PREVIOUS ({source_lang}): {previous}\n"
             f"NEW ({source_lang}): {current}\n\n"
-            f"Rules:\n"
-            f"- Return ONLY the improved translation of the PREVIOUS sentence in {target_lang}.\n"
-            f"- Update wording ONLY if NEW changes meaning, tone, terminology, named entities, or register; otherwise keep the translation unchanged.\n"
-            f"- Do NOT translate or repeat the NEW sentence.\n"
-            f"- Do NOT repeat content already translated unless required for naturalness.\n"
-            f"- If PREVIOUS and NEW are near-duplicates, translate PREVIOUS once.\n"
-            f"- If PREVIOUS is incomplete, produce the most natural fragment consistent with NEW."
+            f"Return ONLY the improved translation of PREVIOUS in {target_lang}."
         )
+        source_for_retry = previous
     else:
         user_prompt = (
-            f"Translate the following from {source_lang} to {target_lang}.\n\n"
+            f"Translate from {source_lang} to {target_lang}.\n\n"
             f"Sentence:\n{text}\n\n"
-            f"Constraints:\n"
-            f"- Output ONLY the translation in {target_lang}; no extra words.\n"
-            f"- If the sentence is already in {target_lang}, return it unchanged."
+            f"Return ONLY the {target_lang} translation."
         )
+        source_for_retry = text if isinstance(text, str) else text[0]
 
     try:
-        response = await client.chat.completions.create(
+        resp = await client.chat.completions.create(
             model="gpt-5",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=200
+            messages=[{"role":"system","content":system_prompt},
+                      {"role":"user","content":user_prompt}],
+            temperature=0.2, max_tokens=200
         )
-        return response.choices[0].message.content.strip()
+        out = (resp.choices[0].message.content or "").strip()
+        if target_lang == "Japanese" and not looks_japanese(out):
+            retry = await client.chat.completions.create(
+                model="gpt-5",
+                messages=[{"role":"system","content":system_prompt},
+                          {"role":"user","content":
+                           f"STRICT: Output the Japanese translation ONLY (kanji/kana). No English, no romaji.\n\n{source_for_retry}"}],
+                temperature=0.1, max_tokens=200
+            )
+            cand = (retry.choices[0].message.content or "").strip()
+            if looks_japanese(cand):
+                out = cand
+        return out
     except Exception as e:
-        print("❌ Translation error:", e)
-        return text if isinstance(text, str) else text[0]
+        print("❌ translate_text error:", e)
+        return ""
 
-# --- Streaming translator (for live feel) ------------------------------------
 async def stream_translate(websocket: WebSocket, text: str, source_lang: str, target_lang: str) -> str:
-    """
-    Streams a translation for 'text' and sends [PARTIAL] events during generation,
-    then a [FINAL] event at completion. Returns the final translated string.
-    """
     system_prompt = (
-        f"You are a professional bidirectional {source_lang} ↔ {target_lang} translator and simultaneous interpreter.\n"
-        f"Goals: produce natural, fluent, culturally appropriate {target_lang}; preserve meaning, tone, and intent; keep terminology consistent across turns.\n\n"
-        f"Policy:\n"
-        f"- Output ONLY the translation in {target_lang} (no quotes, no commentary).\n"
-        f"- If input is already in {target_lang}, return it unchanged.\n"
-        f"- Prefer idiomatic equivalents over literal calques; handle partial speech gracefully."
+        f"You are a professional {source_lang}↔{target_lang} translator.\n"
+        f"- Output ONLY in {target_lang}. No quotes, no commentary.\n"
+        f"- If translating INTO Japanese, write in kanji/kana (no romaji, no English)."
     )
     user_prompt = (
-        f"Translate the following from {source_lang} to {target_lang}.\n\n"
+        f"Translate from {source_lang} to {target_lang}.\n\n"
         f"Sentence:\n{text}\n\n"
-        f"Constraints:\n"
-        f"- Output ONLY the translation in {target_lang}; no extra words.\n"
-        f"- If the sentence is already in {target_lang}, return it unchanged."
+        f"Return ONLY the {target_lang} translation."
     )
 
+    final_text = ""
     try:
         stream = await client.chat.completions.create(
             model="gpt-5",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            temperature=0.2,
-            max_tokens=200,
-            stream=True,
+            messages=[{"role":"system","content":system_prompt},
+                      {"role":"user","content":user_prompt}],
+            temperature=0.2, max_tokens=200, stream=True,
         )
-
-        partial_buf = []
-        last_flush = time.monotonic()
-
+        buf, last = [], time.monotonic()
         async for chunk in stream:
+            delta = ""
             try:
                 delta = chunk.choices[0].delta.get("content") or ""
-            except Exception:
-                delta = ""
+            except:  # noqa: E722
+                pass
             if not delta:
                 continue
-
-            partial_buf.append(delta)
-            s = "".join(partial_buf)
-
+            buf.append(delta)
+            s = "".join(buf)
             now = time.monotonic()
-            # flush policy: punctuation boundary OR 180ms elapsed OR ≥8 tokens
-            boundary = s.endswith(("。", "、", ".", "!", "?", "！", "？"))
-            elapsed = (now - last_flush) > 0.18
-            tokish = (len(s.split()) >= 8)
-
-            if boundary or elapsed or tokish:
+            if s.endswith(("。","、",".","!","?","！","？")) or (now-last)>0.18 or len(s.split())>=8:
                 await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
-                last_flush = now
+                last = now
 
-        final_text = "".join(partial_buf).strip()
+        final_text = "".join(buf).strip()
+        if target_lang == "Japanese" and not looks_japanese(final_text):
+            print("ℹ️ stream_translate non-JP → strict retry")
+            strict = await translate_text(text, source_lang, target_lang)
+            if looks_japanese(strict):
+                final_text = strict
+
         await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
         return final_text
     except Exception as e:
-        print("❌ Streaming translate error:", e)
-        # fall back to non-streaming
-        try:
-            final_text = await translate_text(text, source_lang, target_lang)
-            await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
-            return final_text
-        except Exception:
-            return ""
+        print("❌ stream_translate error:", e)
+        strict = await translate_text(text, source_lang, target_lang)
+        await websocket.send_text(f"[FINAL]{json.dumps({'text': strict}, ensure_ascii=False)}")
+        return strict
 
-# --- WebSocket: receive config then audio frames ------------------------------
+# ---------------- WebSocket ----------------
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -316,10 +236,10 @@ async def websocket_endpoint(websocket: WebSocket):
     global LAST_AUDIO_TS
 
     try:
-        # config message (JSON text)
+        # config
         settings = await websocket.receive_text()
-        config = json.loads(settings)
-        direction = config.get("direction")
+        cfg = json.loads(settings)
+        direction = cfg.get("direction")
         if direction == "en-ja":
             source_lang, target_lang = "English", "Japanese"
         elif direction == "ja-en":
@@ -328,7 +248,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
 
-        # main loop: audio bytes
+        # audio loop
         while True:
             try:
                 audio = await websocket.receive_bytes()
@@ -341,19 +261,12 @@ async def websocket_endpoint(websocket: WebSocket):
             with tempfile.TemporaryDirectory() as td:
                 raw_path = os.path.join(td, "in.webm")
                 wav_path = os.path.join(td, "in.wav")
-
                 with open(raw_path, "wb") as f:
                     f.write(audio)
 
-                # Transcode WITHOUT silenceremove; log errors if any
+                # Transcode WITHOUT silenceremove; surface errors
                 p = subprocess.run(
-                    [
-                        "ffmpeg", "-y",
-                        "-i", raw_path,
-                        "-ar", "16000",
-                        "-ac", "1",
-                        wav_path
-                    ],
+                    ["ffmpeg","-y","-i",raw_path,"-ar","16000","-ac","1",wav_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
                 )
                 if p.returncode != 0:
@@ -377,19 +290,18 @@ async def websocket_endpoint(websocket: WebSocket):
                     print("❌ Whisper transcribe error:", e)
                     continue
 
-            text = result.get("text", "").strip()
+            text = (result.get("text") or "").strip()
             print("📝 Transcribed:", text)
             if not text:
                 continue
 
             # quick thank-you filter
             tl = text.lower()
-            if ("thank you" in tl or "thanks" in tl or
-                "ありがとう" in text or "ありがとうございます" in text or "ありがと" in text):
+            if ("thank you" in tl or "thanks" in tl or "ありがとう" in text or "ありがとうございます" in text or "ありがと" in text):
                 print("🚫 Skipping thank-you/ありがとう phrase:", text)
                 continue
 
-            # GPT-based hallucination filter
+            # hallucination filter
             if await hallucination_check(text):
                 print("🧠 GPT flagged as hallucination:", text)
                 continue
@@ -397,26 +309,22 @@ async def websocket_endpoint(websocket: WebSocket):
             # debounce + min-length gate
             now_ts = time.monotonic()
             if not segment_ready(text, now_ts, LAST_AUDIO_TS):
-                # show ASR partial
                 await websocket.send_text(f"[PARTIAL_ASR]{json.dumps({'text': text}, ensure_ascii=False)}")
-                # remember pending and schedule a quiet-time flush
                 async with _pending_lock:
                     set_pending_text(text)
                 await _schedule_inactivity_flush(websocket, source_lang, target_lang)
                 continue
             else:
-                # clear pending if we consider it ready now
                 async with _pending_lock:
                     set_pending_text("")
 
-            # assign ID and stream-translate immediately
+            # finalize immediately
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
-
             final_translation = await stream_translate(websocket, text, source_lang, target_lang)
+            print("✅ Final translation:", final_translation[:120])
             await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
 
-            # context-refine the previous translation (non-streaming)
             if len(transcript_history) >= 2:
                 prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                 improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")

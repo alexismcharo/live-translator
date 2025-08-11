@@ -34,7 +34,7 @@
   <!-- Output -->
   <div class="w-full max-w-4xl flex flex-col space-y-6 items-center">
     <div class="w-full">
-      <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-tight tracking-wide min-h-[160px] w-full"></div>
+      <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-8 tracking-wide min-h-[160px] w-full"></div>
     </div>
   </div>
 
@@ -45,16 +45,14 @@
     const directionSelect = document.getElementById("direction");
 
     let mediaStream = null;
-    let mediaRecorder = null;
     let socket = null;
     let recording = false;
 
-    // UI state
-    let activePartialEl = null;     // current streaming translation line
-    let activeAsrEl = null;         // optional ASR partial echo line
-    const paragraphs = new Map();   // id -> paragraph element (for [UPDATE])
+    // Single rolling paragraph + ordered segments
+    const segmentOrder = [];          // [id1, id2, ...]
+    const segmentText = new Map();    // id -> text
+    let rollingPara = null;
 
-    // Derived WS URL (works in http and https)
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
       return `${proto}://${location.host}/ws`;
@@ -71,107 +69,92 @@
       stopBtn.classList.toggle("cursor-not-allowed", !running);
     }
 
-    function ensureParagraphFor(id, initialText = "") {
-      let p = paragraphs.get(id);
-      if (!p) {
-        p = document.createElement("div");
-        p.className = "paragraph text-white";
-        p.dataset.id = id;
-        p.textContent = initialText;
-        output.appendChild(p);
-        paragraphs.set(id, p);
+    function ensureRollingPara() {
+      if (!rollingPara) {
+        rollingPara = document.createElement("div");
+        rollingPara.className = "paragraph current text-white";
+        rollingPara.style.whiteSpace = "normal";
+        rollingPara.style.lineHeight = "1.6";
+        rollingPara.style.wordBreak = "break-word";
+        output.appendChild(rollingPara);
       }
-      return p;
+      return rollingPara;
     }
 
-    function appendFinalTextToRollingParagraph(text) {
-      let p = output.querySelector(".paragraph.current");
-      if (!p) {
-        p = document.createElement("div");
-        p.className = "paragraph current text-white";
-        output.appendChild(p);
-      }
-      p.textContent += (p.textContent && !p.textContent.endsWith(" ") ? " " : "") + text;
-
-      // trim rolling text to max chars
-      const maxChars = 350;
+    function rebuildParagraph() {
+      const p = ensureRollingPara();
+      const pieces = segmentOrder.map(id => segmentText.get(id)).filter(Boolean);
+      p.textContent = pieces.join(" ");
+      // trim to a rolling window
+      const maxChars = 800;
       if (p.textContent.length > maxChars) {
-        const words = p.textContent.trim().split(/\s+/);
-        while (p.textContent.length > maxChars && words.length > 1) {
-          words.shift();
-          p.textContent = words.join(" ");
+        while (p.textContent.length > maxChars && segmentOrder.length > 1) {
+          const removed = segmentOrder.shift();
+          segmentText.delete(removed);
         }
+        p.textContent = segmentOrder.map(id => segmentText.get(id)).filter(Boolean).join(" ");
       }
     }
 
     function setActivePartial(text) {
-      if (!activePartialEl) {
-        activePartialEl = document.createElement("div");
-        activePartialEl.className = "text-gray-300 italic caret";
-        output.appendChild(activePartialEl);
+      let ghost = document.getElementById("ghost-partial");
+      if (!ghost) {
+        ghost = document.createElement("span");
+        ghost.id = "ghost-partial";
+        ghost.className = "text-gray-300 italic caret";
+        ensureRollingPara().appendChild(document.createTextNode(" "));
+        ensureRollingPara().appendChild(ghost);
       }
-      activePartialEl.textContent = text;
+      ghost.textContent = text;
     }
-
     function clearActivePartial() {
-      if (activePartialEl?.parentNode) activePartialEl.parentNode.removeChild(activePartialEl);
-      activePartialEl = null;
+      const ghost = document.getElementById("ghost-partial");
+      if (ghost?.parentNode) ghost.parentNode.removeChild(ghost);
     }
-
-    function setAsrPartial(text) {
-      if (!activeAsrEl) {
-        activeAsrEl = document.createElement("div");
-        activeAsrEl.className = "text-gray-500 text-xl italic";
-        output.appendChild(activeAsrEl);
-      }
-      activeAsrEl.textContent = text;
-    }
-
-    function clearAsrPartial() {
-      if (activeAsrEl?.parentNode) activeAsrEl.parentNode.removeChild(activeAsrEl);
-      activeAsrEl = null;
-    }
+    function setAsrPartial(text) { setActivePartial(text); }
+    function clearAsrPartial() { /* cleared with active partial */ }
 
     function handleMessage(data) {
       try {
         if (data.startsWith("[PARTIAL_ASR]")) {
-          const payload = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
-          setAsrPartial(payload.text || "");
+          const { text } = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
+          setAsrPartial(text || "");
           return;
         }
         if (data.startsWith("[PARTIAL]")) {
-          const payload = JSON.parse(data.replace("[PARTIAL]", ""));
-          clearAsrPartial();
-          setActivePartial(payload.text || "");
+          const { text } = JSON.parse(data.replace("[PARTIAL]", ""));
+          setActivePartial(text || "");
           return;
         }
         if (data.startsWith("[FINAL]")) {
-          const payload = JSON.parse(data.replace("[FINAL]", ""));
-          clearAsrPartial();
-          if (payload.text) setActivePartial(payload.text);
+          const { text } = JSON.parse(data.replace("[FINAL]", ""));
+          setActivePartial(text || "");
           return;
         }
         if (data.startsWith("[DONE]")) {
-          const payload = JSON.parse(data.replace("[DONE]", ""));
-          const { id, text } = payload;
+          const { id, text } = JSON.parse(data.replace("[DONE]", ""));
           clearActivePartial();
           if (id && text) {
-            const para = ensureParagraphFor(id, "");
-            para.textContent = text;
+            if (!segmentText.has(id)) segmentOrder.push(id);
+            segmentText.set(id, text);
+            rebuildParagraph();
           } else if (text) {
-            appendFinalTextToRollingParagraph(text);
+            const tempId = `temp-${Date.now()}`;
+            segmentOrder.push(tempId);
+            segmentText.set(tempId, text);
+            rebuildParagraph();
           }
           return;
         }
         if (data.startsWith("[UPDATE]")) {
-          const payload = JSON.parse(data.replace("[UPDATE]", ""));
-          const { id, text } = payload;
-          if (id && paragraphs.has(id)) {
-            paragraphs.get(id).textContent = text || "";
+          const { id, text } = JSON.parse(data.replace("[UPDATE]", ""));
+          if (id) {
+            if (!segmentText.has(id)) segmentOrder.push(id);
+            segmentText.set(id, text || "");
+            rebuildParagraph();
           }
           return;
         }
-        // Back-compat with old server messages:
         if (data.startsWith("[STREAM]")) {
           setActivePartial(data.replace("[STREAM]", ""));
           return;
@@ -183,11 +166,10 @@
 
     async function startRecording() {
       try {
-        // Choose a supported mime type
         const preferred = [
+          "audio/ogg;codecs=opus",
           "audio/webm;codecs=opus",
-          "audio/webm",
-          "audio/ogg;codecs=opus"
+          "audio/webm"
         ];
         let mimeType = "";
         for (const t of preferred) {
@@ -207,18 +189,9 @@
           setButtons(true);
           recordLoop(mimeType);   // 3.2s chunk loop
         };
-
-        socket.onmessage = (event) => handleMessage(event.data);
-
-        socket.onclose = () => {
-          clearActivePartial();
-          clearAsrPartial();
-          setButtons(false);
-        };
-
-        socket.onerror = (e) => {
-          console.error("WebSocket error:", e);
-        };
+        socket.onmessage = (e) => handleMessage(e.data);
+        socket.onclose = () => { clearActivePartial(); clearAsrPartial(); setButtons(false); };
+        socket.onerror = (e) => console.error("WebSocket error:", e);
 
       } catch (err) {
         console.error("Error starting recording:", err);
@@ -241,37 +214,21 @@
           }
         };
 
-        recorder.start();  // no timeslice — control duration manually
+        recorder.start();   // manual duration
         await new Promise((resolve) => {
           setTimeout(() => {
             try { recorder.stop(); } catch {}
             resolve();
-          }, 3200);        // 3.2s chunks
+          }, 3200);         // 3.2s chunks
         });
       }
     }
 
     function stopRecording() {
       recording = false;
-
-      try {
-        if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-      } catch {}
-      mediaRecorder = null;
-
-      try {
-        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
-      } catch {}
-      mediaStream = null;
-
-      try {
-        if (socket && socket.readyState === WebSocket.OPEN) socket.close();
-      } catch {}
-      socket = null;
-
-      clearActivePartial();
-      clearAsrPartial();
-      setButtons(false);
+      try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
+      try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
+      clearActivePartial(); clearAsrPartial(); setButtons(false);
     }
 
     startBtn.onclick = startRecording;
