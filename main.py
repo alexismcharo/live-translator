@@ -95,12 +95,8 @@ Answer with exactly YES or NO.
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
-            reasoning={
-                "effort": "minimal"
-            },
-            text={
-                "verbosity": "low"
-            }
+            reasoning_effort="minimal",
+            text={"verbosity": "low"}
         )
         out = (result.choices[0].message.content or "").strip().upper()
         return out == "YES"
@@ -170,13 +166,8 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
-            reasoning={
-                "effort": "minimal"
-            },
-            text={
-                "verbosity": "low"
-
-            }
+            reasoning_effort="minimal"
+            text={"verbosity": "low"}
         )
         return (response.choices[0].message.content or "").strip()
     except Exception as e:
