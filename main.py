@@ -130,7 +130,7 @@ def looks_like_recent_duplicate(new_text: str, history: list[str],
         if not norm_old:
             continue
         short, long_ = (norm_new, norm_old) if len(norm_new) <= len(norm_old) else (norm_old, norm_new)
-        if len(short) >= 4 and short in long_ and len(short)/len(long_) >= contain_threshold:
+        if len(short) >= 3 and short in long_ and len(short)/len(long_) >= contain_threshold:
             return True
         if SequenceMatcher(None, norm_new, norm_old).ratio() >= ratio_threshold:
             return True
@@ -350,14 +350,6 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
             presence_penalty=0.0,
             max_completion_tokens=160           # modest cap for captions
         )
-
-        if mode == "context":
-            # steadier, stronger anti-repeat during merges
-            kwargs.update(frequency_penalty=0.2)
-        else:
-            # default per-chunk translate
-            kwargs.update(frequency_penalty=0.1)
-
         response = await client.chat.completions.create(**kwargs)
         raw = (response.choices[0].message.content or "").strip()
         out = raw if mode == "context" else dedupe_repeated_ngrams(raw, n=3)
