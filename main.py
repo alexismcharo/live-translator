@@ -349,7 +349,7 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
             reasoning_effort="minimal",
             top_p=1.0,               # keep full nucleus; steer with temperature
             presence_penalty=0.0,
-            max_tokens=160           # modest cap for captions
+            max_completion_tokens=160           # modest cap for captions
         )
 
         if mode == "context":
