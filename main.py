@@ -5,6 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
+#  use torch (if available) to decide fp16 usage
+try:
+    import torch  # type: ignore
+    _HAS_TORCH = True
+except Exception:
+    _HAS_TORCH = False
+
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
@@ -22,7 +29,8 @@ except:
 # Whisper model
 model = whisper.load_model("large-v3")
 try:
-    model.transcribe("/tmp/warm.wav", language="en", fp16=True)
+    # NOTE: fp16 only if CUDA is available. Previously forced True.
+    model.transcribe("/tmp/warm.wav", language="en", fp16=(_HAS_TORCH and torch.cuda.is_available()))
 except:
     pass
 
@@ -45,12 +53,26 @@ def _normalize_for_compare(s: str) -> str:
         return ""
     s = s.lower()
     s = s.replace("kg.", "kg").replace(" kg", "kg")
-    s = re.sub(r"[^a-z0-9£$€¥%\-\. ]+", " ", s)
+    s = re.sub(r"[^a-z0-9£$€¥%\-\.ぁ-んァ-ヶ一-龯 ]+", " ", s)  # allow CJK
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]")
+
 def _simple_words(s: str) -> list[str]:
-    return [t for t in re.findall(r"[a-z0-9]+|£|\$|€|¥|kg|lb|lbs|%|\.|,", s.lower()) if t.strip()]
+    # Keep previous behavior for Latin; treat continuous CJK as separate chars
+    if not s:
+        return []
+    tokens = []
+    for ch in s:
+        if _CJK_RE.match(ch):
+            tokens.append(ch)
+        else:
+            # collect latin/nums/symbols similarly to before
+            pass
+    # Fallback to previous tokenization and then merge
+    base = [t for t in re.findall(r"[a-z0-9]+|£|\$|€|¥|kg|lb|lbs|%|\.|,", s.lower()) if t.strip()]
+    return tokens + base
 
 # --------------------- Source-side overlap stripper ---------------------
 
@@ -176,57 +198,9 @@ def is_soft_address(text: str) -> bool:
         return False
     return any(re.search(pat, text) for pat in _SOFT_VIEWER_ADDRESS)
 
+# NOTE: no longer calling
 async def hallucination_check(text: str) -> bool:
-    """
-    Return True if the segment is a clear CTA or sign-off. Default to False if ambiguous.
-    """
-    try:
-        seg = (text or "").strip()
-        if not seg:
-            return False
-
-        system = (
-            "Classify live ASR segments. Return exactly YES or NO.\n"
-            "YES: clear calls-to-action (subscribe, like, follow), explicit sign-offs (see you next time), "
-            "or directions to links (link in bio/description).\n"
-            "NO: normal conversation, acknowledgments, fillers (yeah, actually, fair enough), "
-            "meta remarks about recording/streaming, and anything ambiguous."
-        )
-        user = f"""
-Segment:
-{seg}
-
-YES examples:
-- Don't forget to subscribe.
-- Hit the bell and turn on notifications.
-- Thanks for watching, see you next time.
-- Link in the description.
-
-NO examples:
-- I mean, that's the thing.
-- This is actually recording.
-- Yeah. / Fair enough. / Actually.
-- Thank you (as part of a longer sentence).
-- Fear that you're skipping the thank yous.
-- But the CTA is actually quite too strict.
-
-Answer with exactly YES or NO.
-""".strip()
-
-        result = await client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            reasoning_effort="minimal",
-            verbosity="low"
-        )
-        out = (result.choices[0].message.content or "").strip().upper()
-        return out == "YES"
-    except Exception as e:
-        print("Hallucination check error:", e)
-        return False
+    return False
 
 # --------------------- Translation ---------------------
 
@@ -244,10 +218,11 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
         user = f"""
 <rules>
 - Output only the improved translation of <previous>.
-- Keep it natural in {target_lang}. Do not add new information.
+- Be natural, do not add new information.
 - If <previous> was a fragment, keep it a natural fragment.
 - Avoid repeating lines already in <recent_target>.
 - Register: {"です・ます" if target_register=="polite" else "casual"} for Japanese; {target_register} for English.
+- Do not re-punctuate unless the source line was closed by punctuation.
 </rules>
 <recent_target>{recent_target_str}</recent_target>
 <previous>{previous}</previous>
@@ -265,6 +240,7 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
 - Do not add greetings/sign-offs/CTAs.
 - If input is already in {target_lang}, return it unchanged.
 - Register: {"です・ます" if target_register=="polite" else "casual"} for Japanese; {target_register} for English.
+- Do not re-punctuate unless the source line was closed by punctuation.
 </rules>
 <recent_target>{recent_target_str}</recent_target>
 <input>{text}</input>
@@ -320,14 +296,20 @@ async def websocket_endpoint(websocket: WebSocket):
             if not audio:
                 continue
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
-                raw.write(audio)
-                raw.flush()
+            # Write temp files and ensure cleanup
+            raw_path = None
+            wav_path = None
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
+                    raw.write(audio)
+                    raw.flush()
+                    raw_path = raw.name
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
+                    wav_path = wav.name
                     try:
                         subprocess.run(
-                            ["ffmpeg", "-y", "-i", raw.name, "-af", "silenceremove=1:0:-40dB", "-ar", "16000", "-ac", "1", wav.name],
+                            ["ffmpeg", "-y", "-i", raw_path, "-af", "silenceremove=1:0:-40dB", "-ar", "16000", "-ac", "1", wav_path],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True
                         )
                     except:
@@ -335,12 +317,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     # Stable settings for live use
                     result = model.transcribe(
-                        wav.name,
-                        fp16=True,
+                        wav_path,
+                        fp16=(_HAS_TORCH and torch.cuda.is_available()),
                         temperature=0.0,
-                        condition_on_previous_text=True,
-                        hallucination_silence_threshold=0.3,
-                        no_speech_threshold=0.3,
+                        condition_on_previous_text=False,
+                        # allow biasing via initial prompt
+                        initial_prompt=(
+                            "Tech for Impact Summit, Socious Global, Beyond Boundaries: Building 2050 Together, "
+                            "Toranomon Hills Forum, Tokyo, AI, quantum computing, biotechnology, clean energy, "
+                            "impact investing, social entrepreneurship, sustainability, Audrey Tang, Charles Hoskinson, "
+                            "Seira Yun, Hector Zenil, Ken Kodama, Alex Zapesochny, DEI, brain-computer interfaces"
+                        ),
+                        # CHANGE: tighter silence / hallucination gates
+                        hallucination_silence_threshold=0.55,
+                        no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.4,
                         logprob_threshold=-1.0
@@ -360,18 +350,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("Skipped short thank-you interjection.")
                         continue
 
-                    # Fast CTA keyword gate; if no hit, avoid LLM call unless needed.
+                    # Fast CTA keyword gate only (drop extra LLM call to reduce latency).
                     if is_cta_like(src_text):
                         print("Dropped CTA/meta filler (keyword).")
                         continue
-
-                    needs_model_check = len(src_text.split()) >= 4 and not is_soft_address(src_text)
-                    try:
-                        if needs_model_check and await hallucination_check(src_text):
-                            print("Dropped CTA/meta filler (model).")
-                            continue
-                    except Exception as e:
-                        print("CTA check failed open (passing segment):", e)
 
                     # Remove overlap against previous ASR tail.
                     delta_src = strip_overlap(prev_src_tail, src_text)
@@ -379,7 +361,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         print("Skipped chunk (entirely overlap).")
                         continue
 
-                    # Update previous tail (keep last ~30 words).
+                    # Update previous tail (keep last ~30 tokens).
                     joined = (prev_src_tail + " " + src_text).strip()
                     tail_words = _simple_words(joined)[-30:]
                     prev_src_tail = " ".join(tail_words)
@@ -407,6 +389,18 @@ async def websocket_endpoint(websocket: WebSocket):
                         prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                         improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
                         await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
+            finally:
+                # cleanup temp files
+                try:
+                    if raw_path and os.path.exists(raw_path):
+                        os.unlink(raw_path)
+                except Exception:
+                    pass
+                try:
+                    if wav_path and os.path.exists(wav_path):
+                        os.unlink(wav_path)
+                except Exception:
+                    pass
 
     except Exception as e:
         print("WebSocket error:", e)
