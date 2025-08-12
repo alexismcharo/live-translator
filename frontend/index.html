@@ -59,9 +59,10 @@
 
     const MAX_CHARS = 400; // cap the paragraph length for live readability
 
+    // FIXED: use a template literal for WebSocket URL
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      return ${proto}://${location.host}/ws;
+      return `${proto}://${location.host}/ws`;
     }
 
     directionSelect.onchange = () => stopRecording();
@@ -115,6 +116,7 @@
     // Backend only sends [DONE] and [UPDATE]
     function handleMessage(data) {
       try {
+        if (typeof data !== "string") return;
         if (data.startsWith("[DONE]")) {
           const { id, text } = JSON.parse(data.replace("[DONE]", ""));
           clearActivePartial();
@@ -124,7 +126,8 @@
         if (data.startsWith("[UPDATE]")) {
           const { id, text } = JSON.parse(data.replace("[UPDATE]", ""));
           if (id) {
-            const target = committed.querySelector([data-id="${id}"]);
+            // FIXED: valid selector string
+            const target = committed.querySelector(`[data-id="${id}"]`);
             if (target) {
               target.textContent = (text || "").trim();
               trimToMaxChars();
@@ -140,6 +143,14 @@
 
     async function startRecording() {
       try {
+        // Feature checks
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          throw new Error("getUserMedia is not available in this browser/context.");
+        }
+        if (!("MediaRecorder" in window)) {
+          throw new Error("MediaRecorder API not supported in this browser.");
+        }
+
         const preferred = [
           "audio/ogg;codecs=opus",
           "audio/webm;codecs=opus",
@@ -147,44 +158,78 @@
         ];
         let mimeType = "";
         for (const t of preferred) {
-          if (MediaRecorder.isTypeSupported(t)) { mimeType = t; break; }
+          try {
+            if (MediaRecorder.isTypeSupported(t)) { mimeType = t; break; }
+          } catch { /* older browsers may throw; ignore */ }
         }
         if (!mimeType) {
-          alert("This browser doesn't support WebM/Opus recording.");
-          return;
+          throw new Error("No supported audio MIME type (WebM/Opus) found.");
         }
 
+        // (Optional) surface current permission state where supported
+        if (navigator.permissions && navigator.permissions.query) {
+          try {
+            const p = await navigator.permissions.query({ name: "microphone" });
+            setStatus(`Microphone permission: ${p.state}`);
+          } catch { /* permissions API not available */ }
+        }
+
+        // This is where the prompt should appear
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
+        setStatus("Connecting…");
         socket = new WebSocket(wsUrl());
+
         socket.onopen = () => {
-          socket.send(JSON.stringify({ direction: directionSelect.value }));
+          try {
+            socket.send(JSON.stringify({ direction: directionSelect.value }));
+          } catch {}
           recording = true;
           setButtons(true);
           setStatus("Recording…");
           recordLoop(mimeType);
         };
+
         socket.onmessage = (e) => handleMessage(e.data);
+
         socket.onclose = () => {
           setButtons(false);
           setActivePartial("");
           setStatus("Disconnected");
           recording = false; // ensure loop stops if socket drops
         };
-        socket.onerror = (e) => console.error("WebSocket error:", e);
+
+        socket.onerror = (e) => {
+          console.error("WebSocket error:", e);
+          setStatus("WebSocket error");
+        };
 
       } catch (err) {
         console.error("Error starting recording:", err);
+        setStatus(
+          (err && err.name) ? `Mic error: ${err.name}` :
+          (err && err.message) ? `Mic error: ${err.message}` :
+          "Mic error"
+        );
         stopRecording();
       }
     }
 
     async function recordLoop(mimeType) {
       while (recording) {
-        const recorder = new MediaRecorder(mediaStream, { mimeType });
+        // Create a short-lived recorder for chunked uploads
+        let recorder;
+        try {
+          recorder = new MediaRecorder(mediaStream, { mimeType });
+        } catch (e) {
+          console.error("Failed to create MediaRecorder:", e);
+          setStatus("Failed to create MediaRecorder");
+          stopRecording();
+          return;
+        }
 
         recorder.ondataavailable = async (e) => {
-          if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
+          if (e.data && e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
             try {
               const buf = await e.data.arrayBuffer();
               socket.send(buf);
@@ -210,11 +255,17 @@
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
       setActivePartial("");
       setButtons(false);
-      setStatus("");
+      // don't overwrite error messages
+      if (!statusEl.textContent) setStatus("");
     }
 
     startBtn.onclick = startRecording;
     stopBtn.onclick = stopRecording;
+
+    // Small UX niceties: warn if not secure context (no prompt will appear)
+    if (location.protocol !== "https:" && location.hostname !== "localhost" && location.hostname !== "127.0.0.1") {
+      setStatus("Tip: Microphone requires HTTPS or localhost.");
+    }
   </script>
 </body>
 </html>
