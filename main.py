@@ -202,22 +202,28 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 </goal>
 
 <completion_policy>
-- If <current> clearly finishes <previous>, merge into a single natural sentence.
-- If not, keep <previous> as a natural fragment — do NOT guess endings.
-- Remove all exact or near-duplicate wording that appears in both <previous> and <current> (ASR overlap).
-- Remove any repeated clause or sentence that appears twice in a row in <previous>, <current>, or their combination.
-- Keep only the clearest version of each clause once, in the best position.
-- Compress restarts and self-corrections without changing meaning.
+- Merge <previous> and <current> only if <current> clearly completes or clarifies <previous>.
+- If any phrase of 4+ consecutive words (or 6+ characters in Japanese) appears in both <previous> and <current>,
+  keep only the clearest, most complete occurrence.
+- If <previous> and <current> both describe the same subject and action (same core meaning),
+  keep only one phrasing — prefer the more complete or fluent version.
+- Remove repeated location/date/time phrases unless each occurrence adds different information.
+- Compress clause restarts and self-corrections without changing meaning.
 - Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) with no meaning.
-- Preserve mood/person from the source — do NOT turn statements into imperatives.
+- Do not add information not present in either <previous> or <current>.
+- Preserve mood/person from source; do NOT change first-person to imperative.
 </completion_policy>
+
 
 <priorities>
 1) Faithful meaning > natural flow > brevity.
-2) Do NOT repeat the same phrase, clause, or object more than once unless the source clearly intends emphasis.
-3) Avoid repeating lines already in <recent_target>.
-4) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
+2) Prefer common collocations and natural phrasing over literal word order.
+3) Eliminate exact or near-duplicate clauses within the merged line, even if wording differs slightly.
+4) Suppress any output that is identical to or a near-duplicate of a line already in <recent_target>, 
+   unless the new version adds clearly new, substantive information or significantly improves clarity.
+5) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
 </priorities>
+
 
 <examples_positive>
 <previous>My name is</previous>
