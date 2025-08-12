@@ -55,17 +55,13 @@
 
     let mediaStream = null;
     let socket = null;
-    let recorder = null;
+    let recording = false;
 
-    // UI cap so the text box stays readable
-    const MAX_CHARS = 400;
-
-    // ~800 ms chunks for live STT translation
-    const TIMESLICE_MS = 800;
+    const MAX_CHARS = 400; // cap the paragraph length for live readability
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
-      return `${proto}://${location.host}/ws`;
+      return ${proto}://${location.host}/ws;
     }
 
     directionSelect.onchange = () => stopRecording();
@@ -97,6 +93,7 @@
     }
 
     function trimToMaxChars() {
+      // Remove oldest segments until under MAX_CHARS
       while (totalChars() > MAX_CHARS && committed.firstElementChild) {
         committed.removeChild(committed.firstElementChild);
       }
@@ -109,6 +106,7 @@
       span.textContent = (text || "").trim();
       committed.appendChild(span);
       trimToMaxChars();
+      // Auto-scroll to bottom
       window.requestAnimationFrame(() => {
         window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
       });
@@ -126,7 +124,7 @@
         if (data.startsWith("[UPDATE]")) {
           const { id, text } = JSON.parse(data.replace("[UPDATE]", ""));
           if (id) {
-            const target = committed.querySelector(`[data-id="${id}"]`);
+            const target = committed.querySelector([data-id="${id}"]);
             if (target) {
               target.textContent = (text || "").trim();
               trimToMaxChars();
@@ -134,6 +132,7 @@
           }
           return;
         }
+        // Ignore any other message types
       } catch (e) {
         console.warn("Message parse error:", e);
       }
@@ -160,39 +159,17 @@
         socket = new WebSocket(wsUrl());
         socket.onopen = () => {
           socket.send(JSON.stringify({ direction: directionSelect.value }));
+          recording = true;
           setButtons(true);
           setStatus("Recording…");
-
-          recorder = new MediaRecorder(mediaStream, {
-            mimeType,
-            // Tweak as needed; lower = smaller payloads
-            audioBitsPerSecond: 32000
-          });
-
-          recorder.ondataavailable = async (e) => {
-            if (!e.data || !e.data.size) return;
-            if (socket?.readyState !== WebSocket.OPEN) return;
-
-            // Simple backpressure guard: if buffers pile up, skip this chunk
-            if (socket.bufferedAmount > 1_000_000) return; // ~1 MB
-
-            try {
-              const buf = await e.data.arrayBuffer();
-              socket.send(buf);
-            } catch (err) {
-              console.warn("send buffer error:", err);
-            }
-          };
-
-          // Continuous recording with ~800ms chunks
-          recorder.start(TIMESLICE_MS);
+          recordLoop(mimeType);
         };
-
         socket.onmessage = (e) => handleMessage(e.data);
         socket.onclose = () => {
           setButtons(false);
           setActivePartial("");
           setStatus("Disconnected");
+          recording = false; // ensure loop stops if socket drops
         };
         socket.onerror = (e) => console.error("WebSocket error:", e);
 
@@ -202,14 +179,35 @@
       }
     }
 
+    async function recordLoop(mimeType) {
+      while (recording) {
+        const recorder = new MediaRecorder(mediaStream, { mimeType });
+
+        recorder.ondataavailable = async (e) => {
+          if (e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
+            try {
+              const buf = await e.data.arrayBuffer();
+              socket.send(buf);
+            } catch (err) {
+              console.warn("send buffer error:", err);
+            }
+          }
+        };
+
+        recorder.start();
+        await new Promise((resolve) => {
+          setTimeout(() => {
+            try { recorder.stop(); } catch {}
+            resolve();
+          }, 3200); // ~3.2s chunks
+        });
+      }
+    }
+
     function stopRecording() {
-      try { recorder?.requestData(); } catch {}
-      try { recorder?.stop(); } catch {}
+      recording = false;
       try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
-
-      recorder = null;
-      mediaStream = null;
       setActivePartial("");
       setButtons(false);
       setStatus("");
