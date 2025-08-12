@@ -177,103 +177,106 @@ def is_soft_address(text: str) -> bool:
     return any(re.search(pat, text) for pat in _SOFT_VIEWER_ADDRESS)
 
 async def hallucination_check(text: str) -> bool:
-    """
-    Return True if the segment is a clear CTA or sign-off. Default to False if ambiguous.
-    """
-    try:
-        seg = (text or "").strip()
-        if not seg:
-            return False
-
-        system = (
-            "Classify live ASR segments. Return exactly YES or NO.\n"
-            "YES: clear calls-to-action (subscribe, like, follow), explicit sign-offs (see you next time), "
-            "or directions to links (link in bio/description).\n"
-            "NO: normal conversation, acknowledgments, fillers (yeah, actually, fair enough), "
-            "meta remarks about recording/streaming, and anything ambiguous."
-        )
-        user = f"""
-Segment:
-{seg}
-
-YES examples:
-- Don't forget to subscribe.
-- Hit the bell and turn on notifications.
-- Thanks for watching, see you next time.
-- Link in the description.
-
-NO examples:
-- I mean, that's the thing.
-- This is actually recording.
-- Yeah. / Fair enough. / Actually.
-- Thank you (as part of a longer sentence).
-- Fear that you're skipping the thank yous.
-- But the CTA is actually quite too strict.
-
-Answer with exactly YES or NO.
-""".strip()
-
-        result = await client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user}
-            ],
-            reasoning_effort="minimal",
-            verbosity="low"
-        )
-        out = (result.choices[0].message.content or "").strip().upper()
-        return out == "YES"
-    except Exception as e:
-        print("Hallucination check error:", e)
-        return False
+    pass
 
 # --------------------- Translation ---------------------
 
 async def translate_text(text, source_lang, target_lang, mode="default"):
     """
-    Produce natural, live-caption style translations.
-    For updates, keep edits minimal to avoid flicker.
+    Produce natural, live-caption style translations with minimal flicker.
+    Polishes for idiomatic phrasing while preserving meaning and completeness.
     """
-    target_register = "polite" if target_lang == "Japanese" else "neutral"
+    # Recent target memory (assumes globals recent_targets, MAX_RECENT exist)
     recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
 
     if mode == "context":
+        # text = (previous, current)
         previous, current = text
-        system = "Refine the previous caption using the current one for context. Output only the improved previous."
+        system = (
+            "You are polishing live captions to sound idiomatic and natural in the target language. "
+            "Your job: improve the PREVIOUS line using CURRENT as context, then output ONLY the improved previous."
+        )
         user = f"""
-<rules>
-- Output only the improved translation of <previous>.
-- Keep it natural in {target_lang}. Do not add new information.
-- If <previous> was a fragment, keep it a natural fragment.
-- Avoid repeating lines already in <recent_target>.
-- Register: {"です・ます" if target_register=="polite" else "casual"} for Japanese; {target_register} for English.
-</rules>
-<recent_target>{recent_target_str}</recent_target>
-<previous>{previous}</previous>
-<current>{current}</current>
+<goal>
+Return a single, natural, idiomatic {target_lang} line that preserves the meaning of <previous>,
+optionally using <current> for disambiguation. Improve fluency, word choice, and rhythm.
+</goal>
+
+<priorities>
+1) Faithful meaning > natural flow > brevity.
+2) If <previous> is a fragment, keep it a natural fragment (do not complete it).
+3) Prefer common collocations and paraphrases over literal word order.
+4) Remove filler/disfluencies (uh/um/えっと) unless semantically meaningful.
+5) Avoid repeating lines already present in <recent_target>.
+</priorities>
+
+<language_tips>
+- Japanese: prefer everyday phrasing; smooth particles; avoid stiff calques; naturalize set phrases.
+- English: prefer contractions and common phrasing; avoid source-language word order when awkward.
+</language_tips>
+
+<forbidden>
+- Adding information not implied by <previous> or <current>.
+- Glosses, brackets, notes, quotes, or explanations. Output text only.
+</forbidden>
+
+<recent_target>
+{recent_target_str}
+</recent_target>
+
+<previous>
+{previous}
+</previous>
+
+<current>
+{current}
+</current>
 """.strip()
     else:
-        system = "Translate live ASR segments. Return only the translation text."
+        system = (
+            "Translate live ASR segments into natural, idiomatic target-language captions. "
+            "Return ONLY the translation text."
+        )
         user = f"""
-<rules>
-- Be natural, not literal; keep meaning faithful.
-- Mirror completeness (fragments stay fragments; do not guess endings).
-- Remove pure fillers (uh/um/えっと) unless meaningful.
-- Keep numbers as digits; preserve names and units.
-- If a phrase appears twice with no new info, keep it once.
-- Do not add greetings/sign-offs/CTAs.
-- If input is already in {target_lang}, return it unchanged.
-- Register: {"です・ます" if target_register=="polite" else "casual"} for Japanese; {target_register} for English.
-</rules>
-<recent_target>{recent_target_str}</recent_target>
-<input>{text}</input>
+<goal>
+Produce fluent, idiomatic {target_lang} that reads like a native speaker wrote it.
+</goal>
+
+<priorities>
+1) Preserve meaning faithfully; do not invent content.
+2) Prefer natural phrasing over literal word order when safe.
+3) Mirror completeness: if input is a fragment, output a natural fragment.
+4) Remove pure fillers (uh/um/えっと) unless they convey hesitation or tone that matters.
+5) Keep numbers as digits; preserve names and units verbatim.
+6) If a phrase repeats with no new info, keep it once.
+7) If input is already in {target_lang}, return it unchanged.
+</priorities>
+
+<language_tips>
+- Japanese: prefer everyday collocations; avoid stiff 「〜することができる」 when 「〜できる」 is natural;
+  drop unnecessary subjects; choose particles for smoothness; avoid calques.
+- English: use contractions, natural verbs, and common collocations; avoid source-language punctuation/order when awkward.
+</language_tips>
+
+<style_targets>
+- Tone: clear, concise, speech-like.
+- Punctuation: minimal but natural for captions.
+</style_targets>
+
+<recent_target>
+{recent_target_str}
+</recent_target>
+
+<input>
+{text}
+</input>
 """.strip()
 
     try:
         response = await client.chat.completions.create(
             model="gpt-5",
-            messages=[{"role":"system","content":system},{"role":"user","content":user}],
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
             reasoning_effort="minimal",
             verbosity="low"
         )
@@ -283,6 +286,7 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
     except Exception as e:
         print("Translation error:", e)
         return text
+
 
 # --------------------- HTTP ---------------------
 
@@ -366,12 +370,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     needs_model_check = len(src_text.split()) >= 4 and not is_soft_address(src_text)
-                    try:
-                        if needs_model_check and await hallucination_check(src_text):
-                            print("Dropped CTA/meta filler (model).")
-                            continue
-                    except Exception as e:
-                        print("CTA check failed open (passing segment):", e)
 
                     # Remove overlap against previous ASR tail.
                     delta_src = strip_overlap(prev_src_tail, src_text)
