@@ -202,115 +202,94 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 </goal>
 
 <completion_policy>
-- Complete ONLY if <current> clearly finishes <previous>. If not obvious, keep <previous> as a natural fragment.
-- Preserve mood/person from source. Do NOT turn 1st-person statements into imperatives.
-- Remove exact or near-duplicate wording that appears in both <previous> and <current> (ASR overlap). Keep the clearest version once in the best position.
-- Compress clause restarts and self-corrections without changing meaning.
+- If <current> clearly finishes <previous>, merge into a single natural sentence.
+- If not, keep <previous> as a natural fragment — do NOT guess endings.
+- Remove all exact or near-duplicate wording that appears in both <previous> and <current> (ASR overlap).
+- Remove any repeated clause or sentence that appears twice in a row in <previous>, <current>, or their combination.
+- Keep only the clearest version of each clause once, in the best position.
+- Compress restarts and self-corrections without changing meaning.
 - Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) with no meaning.
-- If two adjacent clauses/sentences assert the same fact (e.g., “My name is Alexis.” repeated),
-  keep it once.
+- Preserve mood/person from the source — do NOT turn statements into imperatives.
 </completion_policy>
 
 <priorities>
 1) Faithful meaning > natural flow > brevity.
-2) Prefer common collocations over source word order.
-3) Do NOT repeat the same phrase, clause, or object more than once unless the source clearly intends emphasis.
-4) Avoid repeating lines already in <recent_target>.
-5) If <previous> is a heading/label/title, preserve that non-sentence style (don’t narrativize).
-6) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
+2) Do NOT repeat the same phrase, clause, or object more than once unless the source clearly intends emphasis.
+3) Avoid repeating lines already in <recent_target>.
+4) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
 </priorities>
 
-<language_tips>
-- Japanese: everyday phrasing; smooth particles; avoid calques; naturalize set phrases.
-- English: use contractions and common phrasing; avoid source-like punctuation/order when awkward.
-</language_tips>
-
-<forbidden>
-- Adding information not implied by <previous> or <current>.
-- Explanations, notes, quotes, brackets. Output text only.
-</forbidden>
-
-<positive_examples>
-<previous>He said the problem was</previous>
-<current>the problem was caused by a software bug.</current>
-<output>He said the problem was caused by a software bug.</output>
-
+<examples_positive>
 <previous>My name is</previous>
 <current>name is Alexis.</current>
 <output>My name is Alexis.</output>
+
+<previous>My name is Alexis.</previous>
+<current>My name is Alexis.</current>
+<output>My name is Alexis.</output> <!-- deduped -->
 
 <previous>Uh, I think we should</previous>
 <current>we should probably call them now.</current>
 <output>I think we should probably call them now.</output>
 
-<previous>They arrived late because</previous>
-<current>because the train was delayed.</current>
-<output>They arrived late because the train was delayed.</output>
+<previous>Translation when there’s</previous>
+<current>fragments involved.</current>
+<output>Translation when there are fragments involved</output>
 
-<previous>Meeting Agenda</previous>
-<current>for Thursday</current>
-<output>Meeting Agenda for Thursday</output>
+<previous>The driver of Justice Minister Levin</previous>
+<current>Justice Minister Levin's driver changed the locks.</current>
+<output>Justice Minister Levin's driver changed the locks.</output>
 
-<previous>The minister said that</previous>
-<current>the minister said that this policy would be reviewed.</current>
-<output>The minister said that this policy would be reviewed.</output>
+<previous>He said the decision was</previous>
+<current>the decision was final.</current>
+<output>He said the decision was final.</output>
 
-<previous>He plans to visit Paris</previous>
-<current>visit Paris next summer.</current>
-<output>He plans to visit Paris next summer.</output>
+<previous>The meeting will take place</previous>
+<current>take place next Tuesday at 3 p.m.</current>
+<output>The meeting will take place next Tuesday at 3 p.m.</output>
 
-<previous>We need to buy more supplies</previous>
-<current>more supplies for the trip.</current>
-<output>We need to buy more supplies for the trip.</output>
+<previous>Fire breaks out in central market</previous>
+<current>central market blaze under control.</current>
+<output>Fire breaks out in central market — blaze under control.</output> <!-- keeps headline style -->
 
-<previous>She told me</previous>
-<current>she told me to be careful.</current>
-<output>She told me to be careful.</output>
-</positive_examples>
+<previous>We decided to go ahead</previous>
+<current>go ahead with the plan.</current>
+<output>We decided to go ahead with the plan.</output>
 
-<negative_examples>
-<previous>He said the problem was</previous>
-<current>the problem was caused by a software bug.</current>
-<output>He said the problem was the problem was caused by a software bug.</output>  <!-- WRONG -->
+<previous>Officials warned that</previous>
+<current>warned that the storm could worsen overnight.</current>
+<output>Officials warned that the storm could worsen overnight.</output>
+</examples_positive>
 
+<examples_negative>
 <previous>My name is</previous>
 <current>name is Alexis.</current>
-<output>My name is Alexis. My name is Alexis.</output>  <!-- WRONG -->
-
-<previous>Uh, I think we should</previous>
-<current>we should probably call them now.</current>
-<output>Uh, I think we should probably call them now.</output>  <!-- WRONG -->
+<output>My name is Alexis. My name is Alexis.</output> <!-- WRONG -->
 
 <previous>They arrived late because</previous>
 <current>because the train was delayed.</current>
-<output>They arrived late because because the train was delayed.</output>  <!-- WRONG -->
+<output>They arrived late because because the train was delayed.</output> <!-- WRONG -->
 
-<previous>Meeting Agenda</previous>
-<current>for Thursday</current>
-<output>This is the meeting agenda for Thursday.</output>  <!-- WRONG -->
+<previous>My name is Alexis.</previous>
+<current>My name is Alexis.</current>
+<output>My name is Alexis. My name is Alexis.</output> <!-- WRONG -->
 
-<previous>The minister said that</previous>
-<current>the minister said that this policy would be reviewed.</current>
-<output>The minister said that. The minister said that this policy would be reviewed.</output>  <!-- WRONG -->
+<previous>The driver of Justice Minister Levin</previous>
+<current>Justice Minister Levin's driver changed the locks.</current>
+<output>The driver of Justice Minister Levin Justice Minister Levin's driver changed the locks.</output> <!-- WRONG -->
 
-<previous>He plans to visit Paris</previous>
-<current>visit Paris next summer.</current>
-<output>He plans to visit Paris visit Paris next summer.</output>  <!-- WRONG -->
+<previous>The meeting will take place</previous>
+<current>take place next Tuesday at 3 p.m.</current>
+<output>The meeting will take place take place next Tuesday at 3 p.m.</output> <!-- WRONG -->
 
-<previous>We need to buy more supplies</previous>
-<current>more supplies for the trip.</current>
-<output>We need to buy more supplies more supplies for the trip.</output>  <!-- WRONG -->
+<previous>We decided to go ahead</previous>
+<current>go ahead with the plan.</current>
+<output>We decided to go ahead go ahead with the plan.</output> <!-- WRONG -->
 
-<previous>She told me</previous>
-<current>she told me to be careful.</current>
-<output>She told me she told me to be careful.</output>  <!-- WRONG -->
-</negative_examples>
-
-
-<merge_test>
-Merge only if replacing <previous> with the result does not lose meaning and does not introduce repeated clauses.
-If unsure, do not merge.
-</merge_test>
+<previous>Fire breaks out in central market</previous>
+<current>central market blaze under control.</current>
+<output>Fire breaks out in central market. Central market blaze under control.</output> <!-- WRONG for caption/headline style -->
+</examples_negative>
 
 <recent_target>
 {recent_target_str}
