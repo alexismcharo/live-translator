@@ -2,12 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Socious Translator</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { font-family: 'Inter', 'Helvetica Neue', sans-serif; }
     .caret::after { content: ' ▌'; opacity: 0.6; }
+    /* Make the output look like one flowing paragraph */
+    #committed { display: block; white-space: normal; line-height: 1.6; word-break: break-word; }
+    #committed .seg::after { content: " "; } /* space between segments */
   </style>
 </head>
 <body class="bg-[#111112] text-white min-h-screen flex flex-col items-center justify-start p-6 space-y-10">
@@ -36,6 +39,7 @@
     <div class="w-full">
       <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-8 tracking-wide min-h-[160px] w-full">
         <div id="committed"></div>
+        <div id="active" class="caret mt-3 text-white"></div>
       </div>
     </div>
   </div>
@@ -45,11 +49,13 @@
     const stopBtn = document.getElementById("stopBtn");
     const directionSelect = document.getElementById("direction");
     const committed = document.getElementById("committed");
+    const active = document.getElementById("active");
 
     let mediaStream = null;
     let socket = null;
     let recording = false;
-    let activeDiv = null;
+
+    const MAX_CHARS = 700; // cap the paragraph length for live readability
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -67,39 +73,42 @@
       stopBtn.classList.toggle("cursor-not-allowed", !running);
     }
 
-    function ensureActiveDiv() {
-      if (!activeDiv) {
-        activeDiv = document.createElement("div");
-        activeDiv.className = "text-white caret mb-3";
-        activeDiv.style.whiteSpace = "pre-wrap";
-        activeDiv.style.lineHeight = "1.6";
-        activeDiv.style.wordBreak = "break-word";
-        committed.appendChild(activeDiv);
-      }
-      return activeDiv;
-    }
-
     function setActivePartial(text) {
-      const el = ensureActiveDiv();
-      el.textContent = text || "";
+      active.textContent = text || "";
+      active.classList.toggle("caret", !!text);
     }
 
     function clearActivePartial() {
-      if (activeDiv) activeDiv.classList.remove("caret");
+      setActivePartial("");
     }
 
-    function commitFinal(text) {
-      if (!activeDiv) ensureActiveDiv();
-      activeDiv.classList.remove("caret");
-      activeDiv.textContent = (text || "").trim();
-      activeDiv = null;
+    function totalChars() {
+      return committed.innerText.length;
+    }
+
+    function trimToMaxChars() {
+      // Remove oldest segments until under MAX_CHARS
+      while (totalChars() > MAX_CHARS && committed.firstElementChild) {
+        committed.removeChild(committed.firstElementChild);
+      }
+    }
+
+    function commitFinal(text, id = null) {
+      const span = document.createElement("span");
+      span.className = "seg";
+      if (id) span.dataset.id = id;
+      span.textContent = (text || "").trim();
+      committed.appendChild(span);
+      trimToMaxChars();
     }
 
     function handleMessage(data) {
       try {
         if (data.startsWith("[PARTIAL_ASR]")) {
+          // optional: show source-language interim (kept but not emphasized)
           const { text } = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
-          setActivePartial(text || "");
+          // You can comment out the next line if you don’t want to show ASR interim
+          // setActivePartial(text || "");
           return;
         }
         if (data.startsWith("[PARTIAL]")) {
@@ -115,14 +124,18 @@
         if (data.startsWith("[DONE]")) {
           const { id, text } = JSON.parse(data.replace("[DONE]", ""));
           clearActivePartial();
-          commitFinal(text || "");
+          commitFinal(text || "", id);
           return;
         }
         if (data.startsWith("[UPDATE]")) {
-          const { text } = JSON.parse(data.replace("[UPDATE]", ""));
-          // Update the last committed line if present
-          const last = committed.lastElementChild;
-          if (last) last.textContent = (text || "").trim();
+          const { id, text } = JSON.parse(data.replace("[UPDATE]", ""));
+          if (id) {
+            const target = committed.querySelector(`[data-id="${id}"]`);
+            if (target) {
+              target.textContent = (text || "").trim();
+              trimToMaxChars();
+            }
+          }
           return;
         }
         if (data.startsWith("[STREAM]")) {
@@ -160,7 +173,7 @@
           recordLoop(mimeType);
         };
         socket.onmessage = (e) => handleMessage(e.data);
-        socket.onclose = () => { setButtons(false); activeDiv = null; };
+        socket.onclose = () => { setButtons(false); setActivePartial(""); };
         socket.onerror = (e) => console.error("WebSocket error:", e);
 
       } catch (err) {
@@ -189,7 +202,7 @@
           setTimeout(() => {
             try { recorder.stop(); } catch {}
             resolve();
-          }, 3200); // 3.2s chunks
+          }, 3200); // ~3.2s chunks
         });
       }
     }
@@ -198,7 +211,7 @@
       recording = false;
       try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
-      activeDiv = null;
+      setActivePartial("");
       setButtons(false);
     }
 
