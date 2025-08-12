@@ -32,6 +32,7 @@
         <button id="stopBtn" disabled class="bg-gray-500 text-white font-semibold px-6 py-2 rounded opacity-50 cursor-not-allowed">Stop Recording</button>
       </div>
     </div>
+    <div id="status" class="text-sm text-gray-400"></div>
   </div>
 
   <!-- Output -->
@@ -50,6 +51,7 @@
     const directionSelect = document.getElementById("direction");
     const committed = document.getElementById("committed");
     const active = document.getElementById("active");
+    const statusEl = document.getElementById("status");
 
     let mediaStream = null;
     let socket = null;
@@ -71,6 +73,10 @@
       startBtn.classList.toggle("cursor-not-allowed", running);
       stopBtn.classList.toggle("opacity-50", !running);
       stopBtn.classList.toggle("cursor-not-allowed", !running);
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text || "";
     }
 
     function setActivePartial(text) {
@@ -100,27 +106,15 @@
       span.textContent = (text || "").trim();
       committed.appendChild(span);
       trimToMaxChars();
+      // Auto-scroll to bottom
+      window.requestAnimationFrame(() => {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+      });
     }
 
+    // Backend only sends [DONE] and [UPDATE]
     function handleMessage(data) {
       try {
-        if (data.startsWith("[PARTIAL_ASR]")) {
-          // optional: show source-language interim (kept but not emphasized)
-          const { text } = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
-          // You can comment out the next line if you don’t want to show ASR interim
-          // setActivePartial(text || "");
-          return;
-        }
-        if (data.startsWith("[PARTIAL]")) {
-          const { text } = JSON.parse(data.replace("[PARTIAL]", ""));
-          setActivePartial(text || "");
-          return;
-        }
-        if (data.startsWith("[FINAL]")) {
-          const { text } = JSON.parse(data.replace("[FINAL]", ""));
-          setActivePartial(text || "");
-          return;
-        }
         if (data.startsWith("[DONE]")) {
           const { id, text } = JSON.parse(data.replace("[DONE]", ""));
           clearActivePartial();
@@ -138,10 +132,7 @@
           }
           return;
         }
-        if (data.startsWith("[STREAM]")) {
-          setActivePartial(data.replace("[STREAM]", ""));
-          return;
-        }
+        // Ignore any other message types
       } catch (e) {
         console.warn("Message parse error:", e);
       }
@@ -170,10 +161,16 @@
           socket.send(JSON.stringify({ direction: directionSelect.value }));
           recording = true;
           setButtons(true);
+          setStatus("Recording…");
           recordLoop(mimeType);
         };
         socket.onmessage = (e) => handleMessage(e.data);
-        socket.onclose = () => { setButtons(false); setActivePartial(""); };
+        socket.onclose = () => {
+          setButtons(false);
+          setActivePartial("");
+          setStatus("Disconnected");
+          recording = false; // ensure loop stops if socket drops
+        };
         socket.onerror = (e) => console.error("WebSocket error:", e);
 
       } catch (err) {
@@ -213,6 +210,7 @@
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
       setActivePartial("");
       setButtons(false);
+      setStatus("");
     }
 
     startBtn.onclick = startRecording;

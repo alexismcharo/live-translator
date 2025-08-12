@@ -1,501 +1,99 @@
-import os
-import json
-import uuid
-import time
-import tempfile
-import subprocess
-from collections import deque
-
-import uvicorn
-import whisper
-import openai
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Setup
-# ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
-if not api_key:
-    raise RuntimeError("OPENAI_API_KEY not set")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def safe_output_text(resp) -> str:
-    """
-    Extract text from Responses API results across shapes:
-    - resp.output_text (when present)
-    - resp.output[i].text (string)
-    - resp.output[i].content[*].text.value (common GPT-5 shape)
-    """
-    def grab_text_val(x):
-        # direct string
-        if isinstance(x, str):
-            return x
-        # pydantic-like object with .value or .text
-        for attr in ("value", "text"):
-            v = getattr(x, attr, None)
-            if isinstance(v, str) and v.strip():
-                return v
-            # nested object with .value (e.g., x.text.value)
-            if hasattr(v, "value") and isinstance(v.value, str) and v.value.strip():
-                return v.value
-        # dict fallback
-        if hasattr(x, "model_dump"):
-            d = x.model_dump()
-        elif isinstance(x, dict):
-            d = x
-        else:
-            d = None
-        if isinstance(d, dict):
-            v = d.get("value") or d.get("text") or d.get("input_text")
-            if isinstance(v, str) and v.strip():
-                return v
-            if isinstance(v, dict):
-                vv = v.get("value") or v.get("text")
-                if isinstance(vv, str) and vv.strip():
-                    return vv
-        return ""
-
-    if not resp:
-        return ""
-
-    # 1) happy path when SDK exposes output_text
-    txt = getattr(resp, "output_text", None)
-    if isinstance(txt, str) and txt.strip():
-        return txt.strip()
-
-    # 2) scan output array
-    out = []
-    output = getattr(resp, "output", []) or []
-    for item in output:
-        # some SDKs put direct .text on items
-        it_text = getattr(item, "text", None)
-        if isinstance(it_text, str) and it_text:
-            out.append(it_text)
-
-        # most GPT-5 responses: message items with content parts
-        content = getattr(item, "content", []) or []
-        for part in content:
-            t = getattr(part, "text", None) or getattr(part, "input_text", None)
-            val = grab_text_val(t)
-            if val:
-                out.append(val)
-
-    if out:
-        return "".join(out).strip()
-
-    # 3) final fallbacks
-    for attr in ("message", "content", "text"):
-        val = getattr(resp, attr, None)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-
-    return ""
-
-
-def looks_japanese(s: str) -> bool:
-    return any(0x3040 <= ord(ch) <= 0x30FF or 0x4E00 <= ord(ch) <= 0x9FFF for ch in s)
-
-def looks_english(s: str) -> bool:
-    return any(("A" <= ch <= "Z") or ("a" <= ch <= "z") for ch in s)
-
-def violates_target_lang(output: str, target_lang: str) -> bool:
-    out = (output or "").strip()
-    if not out:
-        return True
-    if target_lang == "Japanese":
-        return not looks_japanese(out)
-    if target_lang == "English":
-        return not looks_english(out)
-    return False
-
-# Trivial fragment filter (to drop lone "you", "um", 「えっと」, etc.)
-PRONOUNS_EN = {"you","i","me","we","they","he","she","it"}
-FILLER_EN   = {"uh","um","er","ah","oh","hmm","huh","uh-huh","nah","yep","nope","like"}
-PRONOUNS_JA = {"あなた","私","僕","俺","我々","彼","彼女"}
-FILLER_JA   = {"えっと","あの","うーん","えーと","まぁ","その"}
-
-def should_skip_fragment(text: str, source_lang: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return True
-    if source_lang == "English":
-        import re
-        words = re.findall(r"[A-Za-z]+", t.lower())
-        if len(words) == 1 and (words[0] in PRONOUNS_EN or words[0] in FILLER_EN):
-            return True
-        return False
-    if source_lang == "Japanese":
-        if t in FILLER_JA or t in PRONOUNS_JA:
-            return True
-        # very short kana-only interjections
-        if len(t) <= 2 and any("ぁ" <= ch <= "ん" or "ァ" <= ch <= "ン" for ch in t):
-            return True
-        return False
-    return False
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Warm FFmpeg & Whisper
-# ──────────────────────────────────────────────────────────────────────────────
-WARMUP_WAV = "/tmp/warm.wav"
+# Pre-warm ffmpeg & audio stack
 try:
-    subprocess.run(
-        ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5",
-         "-ar", "16000", "-ac", "1", "-y", WARMUP_WAV],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-    )
-except Exception:
+    subprocess.run([
+        "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+        "-t", "0.5", "-ar", "16000", "-ac", "1",
+        "-y", "/tmp/warm.wav"
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+except:
     pass
 
+# Optimized for T4 GPU (if available)
 model = whisper.load_model("large-v3")
+
+# Warm Whisper model once to reduce first-latency (fix path)
 try:
-    model.transcribe(WARMUP_WAV, language="en", fp16=True)
-except Exception:
+    model.transcribe("/tmp/warm.wav", language="en", fp16=True)
+except:
     pass
 
-# ──────────────────────────────────────────────────────────────────────────────
-# FastAPI
-# ──────────────────────────────────────────────────────────────────────────────
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# Store original (source) text for context refinement: (segment_id, original_text)
-transcript_history = deque(maxlen=500)
+transcript_history = []  # [(segment_id, original_text)]
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Hallucination / Filler filter  (IMPROVED)
-# ──────────────────────────────────────────────────────────────────────────────
-_HALLU_PHRASES = [
-    # english CTA / video tropes
-    "welcome to my channel",
-    "thanks for watching",
-    "don't forget to subscribe",
-    "like and subscribe",
-    "click the bell",
-    "smash that like button",
-    "see you in the next video",
-    "in this video",
-    "today i will show you",
-    "i'm going to show you",
-    "hope you enjoy watching",
-    # jp equivalents (rough/common)
-    "チャンネル登録", "高評価よろしく", "この動画では", "本日はご紹介します", "最後までご覧ください",
-]
+@app.get("/")
+async def serve_index():
+    return FileResponse(os.path.join("frontend", "index.html"))
 
-def _excessive_repetition(text: str) -> bool:
-    """Detect obvious loops like 'I hope you will enjoy it.' repeated many times."""
-    import re
-    s = re.sub(r"\s+", " ", (text or "")).strip().lower()
-    if not s:
-        return False
-    # same sentence repeated ≥3 times
-    parts = re.split(r"[。！？\.\!\?]+", s)
-    parts = [p.strip() for p in parts if p.strip()]
-    if not parts:
-        return False
-    from collections import Counter
-    c = Counter(parts)
-    if any(v >= 3 and len(k) >= 8 for k, v in c.items()):
-        return True
-    # repeated 3–5-gram loops
-    words = re.findall(r"[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]+", s)
-    for n in (3, 4, 5):
-        grams = [" ".join(words[i:i+n]) for i in range(max(0, len(words)-n+1))]
-        cc = Counter(grams)
-        if any(v >= 3 and len(k) >= 8 for k, v in cc.items()):
-            return True
-    # very long + contains hallmark phrases
-    if len(s) > 300 and any(p in s for p in _HALLU_PHRASES):
-        return True
-    return False
-
-def _contains_hallu_phrase(text: str) -> bool:
-    s = (text or "").lower()
-    return any(p in s for p in _HALLU_PHRASES)
-
+# --- Live-aware hallucination filter (keeps normal chatter; blocks broadcast CTAs) ---
 async def hallucination_check(text: str) -> bool:
     """
-    Returns True if 'text' is generic filler/CTA or shows repetition/looping.
-    Heuristic pass first; if inconclusive, ask a tiny model.
+    Returns True if the segment should be dropped as broadcast-style filler
+    (subscribe/like/sign-off/viewer address), False otherwise.
     """
-    # Heuristics catch obvious junk quickly (no API call)
-    if _excessive_repetition(text) or _contains_hallu_phrase(text):
-        return True
-
-    # Model pass (YES/NO only). Keep >=16 tokens per GPT-5 Responses rules.
     try:
-        prompt = (
-            "You are a strict hallucination/filler detector for live captions.\n"
-            "Reply YES only if the sentence is a generic intro/outro/CTA (e.g., 'welcome to my channel', "
-            "'don't forget to subscribe', 'thanks for watching', 'in this video'), OR if it contains obvious "
-            "repetitive/looping filler. Otherwise reply NO.\n\n"
-            "Reply ONLY YES or NO.\n\n"
-            "Sentence:\n" + (text or "")
+        system = (
+            "You are a binary classifier for a LIVE ASR → translation pipeline. "
+            "Return exactly one token: YES or NO."
         )
-        resp = await client.responses.create(
-            model="gpt-5-nano",
-            input=[
-                {"role": "system", "content": "Return ONLY YES or NO."},
-                {"role": "user",   "content": prompt},
+        user = f"""
+We are processing short, possibly incomplete ASR segments in real time.
+Decide if the segment is *broadcast-style filler* (audience address, subscribe/like calls, end-of-video sign-off) that should be dropped from live translation.
+
+Guidelines:
+- Return YES only if the segment is clearly a CTA/sign-off or meta-address to viewers.
+- Return NO for normal conversational content, even if brief (e.g., 'thanks', 'sorry', 'okay') or disfluent (um/uh/えっと).
+- If the segment looks incomplete or mid-utterance, default to NO unless it already contains a clear CTA cue.
+
+Positive examples (YES):
+- Thanks for watching!
+- Don't forget to subscribe.
+- Click the bell icon.
+- See you in the next video.
+- Link in the description.
+- 皆さんこんにちは (as a YouTuber-style opener addressing viewers)
+- チャンネル登録お願いします / 高評価お願いします / ベルマーク通知をオンに
+
+Negative examples (NO):
+- Thank you. (as a normal conversational turn)
+- Sorry about that.
+- Okay, next step.
+- ありがとうございます。 / すみません。 / はい、次に進みます。
+- (partial) "Click the..." — unless it’s clearly a CTA (insufficient on its own → NO)
+
+Segment:
+
+Answer with exactly YES or NO.
+""".strip()
+
+        result = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
             ],
-            max_output_tokens=32
+            temperature=0,
+            max_tokens=1
         )
-        content = (safe_output_text(resp) or "").strip().upper()
-        if content.startswith("YES"):
-            return True
-        if content.startswith("NO"):
-            return False
+        return result.choices[0].message.content.strip().upper() == "YES"
+    except:
         return False
-    except Exception as e:
-        print("⚠️ hallucination_check error:", e)
-        return False
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Translation (non-stream + enforced)
-# ──────────────────────────────────────────────────────────────────────────────
-def translator_system_prompt(source_lang: str, target_lang: str) -> str:
-    return (
-        f"You are a professional {source_lang}↔{target_lang} translator.\n"
-        f"- Output ONLY in {target_lang}. No quotes, no commentary.\n"
-        f"- Translate even if the source is a fragment or incomplete.\n"
-        f"- Never return an empty string; if uncertain, translate literally."
-    )
-
-def strict_user_prompt(text: str, source_lang: str, target_lang: str) -> str:
-    return (
-        f"Translate from {source_lang} to {target_lang}.\n\n"
-        f"Sentence:\n{text}\n\n"
-        f"Return ONLY the {target_lang} translation (no extra words)."
-    )
-
-async def translate_text(text, source_lang: str, target_lang: str, mode: str = "default") -> str:
-    """
-    Non-streaming translation. For mode='context', `text` is (previous, current).
-    NEVER returns tuples; only strings.
-    """
-    if mode == "context":
-        previous, current = text
-        user_prompt = (
-            f"Refine the translation of the PREVIOUS sentence using the NEW sentence as context.\n\n"
-            f"PREVIOUS ({source_lang}): {previous}\n"
-            f"NEW ({source_lang}): {current}\n\n"
-            f"Return ONLY the improved translation of PREVIOUS in {target_lang}."
-        )
-    else:
-        user_prompt = strict_user_prompt(text, source_lang, target_lang)
-
-    try:
-        resp = await client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
-                {"role": "user",   "content": user_prompt},
-            ],
-            max_output_tokens=200
-        )
-        out = safe_output_text(resp)
-        if not out:
-            print("⚠️ translate_text returned empty")
-        if not out and mode == "context":
-            previous, _ = text
-            return str(previous)
-        return out or (str(text) if isinstance(text, str) else "")
-    except Exception as e:
-        print("❌ translate_text error:", e)
-        if mode == "context":
-            previous, _ = text
-            return str(previous)
-        return text if isinstance(text, str) else ""
-
-async def translate_text_enforced(text: str, source_lang: str, target_lang: str) -> str:
-    """
-    Enforced translation of a single sentence (no context).
-    """
-    try:
-        resp = await client.responses.create(
-            model="gpt-5",
-            input=[
-                {"role": "system", "content": translator_system_prompt(source_lang, target_lang) +
-                 "\nCRITICAL: Do NOT echo the source. Output must be in the target language script."},
-                {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
-            ],
-            max_output_tokens=220
-        )
-        return safe_output_text(resp) or ""
-    except Exception as e:
-        print("❌ translate_text_enforced error:", e)
-        return ""
-
-async def refine_previous(prev_text: str, curr_text: str,
-                          source_lang: str, target_lang: str):
-    """
-    Returns refined previous translation string, or None if not confident.
-    """
-    out = await translate_text((prev_text, curr_text), source_lang, target_lang, mode="context")
-    if out and not violates_target_lang(out, target_lang):
-        return out
-
-    enforced = await translate_text_enforced(prev_text, source_lang, target_lang)
-    if enforced and not violates_target_lang(enforced, target_lang):
-        return enforced
-
-    print("ℹ️ refinement skipped (empty/invalid)")
-    return None
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Streaming 
-# ──────────────────────────────────────────────────────────────────────────────
-async def stream_translate(websocket: WebSocket, text: str,
-                           source_lang: str, target_lang: str) -> str:
-    """
-    GPT-5 streaming that supports both legacy text deltas and
-    response.output_item.{added,done} events. Falls back to non-stream & enforces.
-    Also runs the hallucination check on the translation before emitting.
-    """
-    final_text = ""
-    types_seen = set()
-
-    def append_from_output_item(event, buf):
-        # event.item may be a 'message' with content parts -> .text.value
-        item = getattr(event, "item", None)
-        if not item:
-            return
-        # 1) message with content parts
-        content = getattr(item, "content", None)
-        if content:
-            try:
-                for part in content:
-                    # part.text may be str OR object with .value
-                    part_text = getattr(part, "text", None) or getattr(part, "input_text", None)
-                    if isinstance(part_text, str) and part_text:
-                        buf.append(part_text)
-                    else:
-                        v = getattr(part_text, "value", None) or getattr(part_text, "text", None)
-                        if isinstance(v, str) and v:
-                            buf.append(v)
-                        elif hasattr(part_text, "model_dump"):
-                            d = part_text.model_dump()
-                            vv = d.get("value") or d.get("text")
-                            if isinstance(vv, str) and vv:
-                                buf.append(vv)
-            except Exception:
-                pass
-        # 2) output_text item form: event.item.output_text.text.value
-        ot = getattr(item, "output_text", None)
-        if ot is not None:
-            # ot may have .text or .value
-            tv = getattr(ot, "text", None)
-            if isinstance(tv, str) and tv:
-                buf.append(tv)
-            elif hasattr(tv, "value") and isinstance(tv.value, str):
-                buf.append(tv.value)
-
-    try:
-        buf = []
-        last_partial_ts = time.monotonic()
-
-        async with client.responses.stream(
-            model="gpt-5",
-            input=[
-                {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
-                {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
-            ],
-            max_output_tokens=200
-        ) as stream:
-
-            async for event in stream:
-                etype = getattr(event, "type", "") or ""
-                types_seen.add(etype)
-
-                # Legacy: response.output_text.delta / response.text.delta
-                if etype.endswith(".text.delta") or etype.endswith("output_text.delta"):
-                    delta = getattr(event, "delta", None)
-                    if isinstance(delta, str) and delta:
-                        buf.append(delta)
-
-                # New: response.output_item.{added,done}
-                if etype.startswith("response.output_item."):
-                    append_from_output_item(event, buf)
-
-                # Also: response.output_text.done sometimes carries the full text
-                if etype.endswith("output_text.done"):
-                    ot = getattr(event, "output_text", None)
-                    # try ot.text.value then ot.text
-                    if ot is not None:
-                        tv = getattr(ot, "text", None)
-                        if hasattr(tv, "value") and isinstance(tv.value, str) and tv.value:
-                            buf.append(tv.value)
-                        elif isinstance(tv, str) and tv:
-                            buf.append(tv)
-
-                # Throttle partials
-                s = "".join(buf)
-                if s:
-                    now = time.monotonic()
-                    if s.endswith(("。","、",".","!","?","！","？")) or (now - last_partial_ts) > 0.18 or len(s.split()) >= 8:
-                        await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
-                        last_partial_ts = now
-
-            # Finalization — get text even if no deltas arrived
-            final_resp = await stream.get_final_response()
-            final_text = "".join(buf).strip() or safe_output_text(final_resp) or ""
-
-    except Exception as e:
-        print("❌ stream_translate error:", e)
-
-    if not final_text:
-        print(f"⚠️ stream empty — types_seen={sorted(types_seen)}; trying non-stream")
-        try:
-            resp = await client.responses.create(
-                model="gpt-5",
-                input=[
-                    {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
-                    {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
-                ],
-                max_output_tokens=200
-            )
-            final_text = safe_output_text(resp) or ""
-        except Exception as e:
-            print("❌ non-streaming fallback error:", e)
-
-    # Guard against GPT-side filler/hallucination in the translation
-    try:
-        if final_text and await hallucination_check(final_text):
-            print("🧠 GPT translation flagged as hallucination — retrying literal enforcement")
-            retry = await translate_text_enforced(text, source_lang, target_lang)
-            if retry:
-                final_text = retry
-    except Exception as e:
-        print("⚠️ hallucination_check on translation failed:", e)
-
-    # Enforce target language
-    if not final_text or violates_target_lang(final_text, target_lang):
-        print("⚠️ enforcing target language (current segment)…")
-        enforced = await translate_text_enforced(text, source_lang, target_lang)
-        if enforced and not violates_target_lang(enforced, target_lang):
-            final_text = enforced
-
-    if not final_text:
-        print("‼️ FINAL EMPTY after stream+fallback; echoing source to avoid blank UI")
-        final_text = text
-
-    await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
-    return final_text
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# WebSocket
-# ──────────────────────────────────────────────────────────────────────────────
+# --- WebSocket for streaming translation ---
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -503,8 +101,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         settings = await websocket.receive_text()
-        cfg = json.loads(settings or "{}")
-        direction = cfg.get("direction", "")
+        config = json.loads(settings)
+        direction = config.get("direction")
         if direction == "en-ja":
             source_lang, target_lang = "English", "Japanese"
         elif direction == "ja-en":
@@ -514,108 +112,151 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
         while True:
-            # Receive a chunk and transcribe
-            try:
-                audio = await websocket.receive_bytes()
-            except Exception:
-                break
+            msg = await websocket.receive()
+            if "bytes" not in msg:
+                continue
+
+            audio = msg["bytes"]
             if not audio:
                 continue
 
-            with tempfile.TemporaryDirectory() as td:
-                raw_path = os.path.join(td, "in.webm")
-                wav_path = os.path.join(td, "in.wav")
-                with open(raw_path, "wb") as f:
-                    f.write(audio)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
+                raw.write(audio)
+                raw.flush()
 
-                p = subprocess.run(
-                    ["ffmpeg", "-hide_banner", "-loglevel", "error",
-                     "-y", "-i", raw_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-                )
-                if p.returncode != 0:
-                    err = p.stderr.decode("utf-8", errors="ignore")
-                    print("ffmpeg error:", err[:300])
-                    continue
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
+                    try:
+                        subprocess.run([
+                            "ffmpeg", "-y",
+                            "-i", raw.name,
+                            "-af", "silenceremove=1:0:-40dB",
+                            "-ar", "16000",
+                            "-ac", "1",
+                            wav.name
+                        ],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        check=True
+                        )
+                    except:
+                        continue
 
-                try:
                     result = model.transcribe(
-                        wav_path,
+                        wav.name,
                         fp16=True,
                         temperature=0.0,
                         beam_size=1,
                         condition_on_previous_text=True,
+                        hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
-                        compression_ratio_threshold=2.4,
-                        logprob_threshold=-1.0,
                         language="en" if source_lang == "English" else "ja",
+                        compression_ratio_threshold=2.4,
+                        logprob_threshold=-1.0
                     )
-                except Exception as e:
-                    print("❌ Whisper transcribe error:", e)
-                    continue
 
-            text = (result.get("text") or "").strip()
-            print("📝 Transcribed:", text)
-            if not text:
-                continue
+                    text = result["text"].strip()
+                    print("📝 Transcribed:", text)
+                    if not text:
+                        continue
 
-            # Thank-you filter
-            tl = text.lower()
-            if ("thank you" in tl or "thanks" in tl or
-                "ありがとう" in text or "ありがとうございます" in text or "ありがと" in text):
-                print("🚫 Skipping thank-you:", text)
-                continue
+                    # GPT-based hallucination filter (keeps normal conversational turns)
+                    if await hallucination_check(text):
+                        print("🧠 GPT flagged as broadcast/CTA filler:", text)
+                        continue
 
-            # Filler/CTA classifier (source-side)
-            try:
-                if await hallucination_check(text):
-                    print("🧠 Skipping filler/hallucination:", text)
-                    continue
-            except Exception as e:
-                print("⚠️ hallucination_check failed:", e)
+                    # assign ID and translate
+                    segment_id = str(uuid.uuid4())
+                    transcript_history.append((segment_id, text))
 
-            # Trivial fragment filter
-            if should_skip_fragment(text, source_lang):
-                print("🚫 Skipping trivial fragment:", text)
-                continue
+                    translated = await translate_text(text, source_lang, target_lang)
+                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
-            # New segment (translate immediately)
-            segment_id = str(uuid.uuid4())
-            transcript_history.append((segment_id, text))
-
-            final_translation = await stream_translate(websocket, text, source_lang, target_lang)
-            print(f"✅ [SEG {segment_id[:8]}] Final translation:", final_translation[:120])
-            await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
-
-            # Refinement: improve the previous segment with context from current
-            if len(transcript_history) >= 2:
-                prev_id, prev_text = transcript_history[-2]
-                curr_id, curr_text = transcript_history[-1]
-                try:
-                    improved = await refine_previous(prev_text, curr_text, source_lang, target_lang)
-                    if improved and improved.strip() and not violates_target_lang(improved, target_lang):
-                        print(f"🔄 Refinement for prev {prev_id[:8]} using curr {curr_id[:8]}:", improved[:120])
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': prev_id, 'text': improved}, ensure_ascii=False)}")
-                    else:
-                        print(f"ℹ️ No valid refinement for prev {prev_id[:8]} (keeping original).")
-                except Exception as e:
-                    print("❌ refinement error:", e)
+                    # update previous translation using new context
+                    if len(transcript_history) >= 2:
+                        prev, curr = transcript_history[-2][1], transcript_history[-1][1]
+                        improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
 
     except Exception as e:
-        print("❌ WebSocket error (outer loop):", e)
-    finally:
-        try:
-            await websocket.close()
-        except Exception:
-            pass
-        print("🔌 WebSocket disconnected")
+        print("❌ WebSocket error:", e)
+        await websocket.close()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Static
-# ──────────────────────────────────────────────────────────────────────────────
-@app.get("/")
-async def serve_index():
-    return FileResponse(os.path.join("frontend", "index.html"))
+# --- Main translation function (natural, live-caption style) ---
+async def translate_text(text, source_lang, target_lang, mode="default"):
+    """
+    Natural, idiomatic live captions; mirrors fragment completeness; minimal edits on refinements.
+    """
+    target_register = "polite" if target_lang == "Japanese" else "neutral"
+
+    if mode == "context":
+        previous, current = text
+        system = (
+            "You are a live simultaneous interpreter refining captions. "
+            "Revise ONLY the translation of <previous> using <current> for context."
+        )
+        user = f"""
+<task>
+Produce a natural, idiomatic {target_lang} caption for <previous>, updating it only if <current> clarifies meaning.
+</task>
+
+<rules>
+- Output: ONLY the improved translation of <previous>. No quotes, no commentary.
+- Prefer minimal edits to avoid visual 'jumping' in captions.
+- Make phrasing natural in {target_lang} (not literal), but add no new information.
+- If <previous> was a fragment, keep it a natural fragment; don't invent endings.
+- Resolve pronouns, names, tense, or ellipsis only if <current> makes them clear.
+- Remove filler like uh/um/えっと/あの unless meaningful.
+- Keep numbers as digits and preserve proper nouns/terminology.
+- Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
+</rules>
+
+<previous>
+{previous}
+</previous>
+
+<current>
+{current}
+</current>
+""".strip()
+    else:
+        system = (
+            "You are a live, natural translator for streaming ASR. "
+            "Return ONLY the translation text—no quotes or extra words."
+        )
+        user = f"""
+<task>
+Translate a short, possibly incomplete ASR segment from {source_lang} to {target_lang} for live captions. Aim for natural, idiomatic speech.
+</task>
+
+<rules>
+- Natural over literal: use target-language word order and phrasing; keep meaning faithful.
+- Mirror completeness: if the source is a fragment, keep a natural fragment; do not guess the rest.
+- Remove pure filled pauses (uh/um/えっと/あの) unless they carry meaning.
+- Keep numbers as digits; preserve names, technical terms, and units.
+- Do not add greetings/sign-offs/explanations or YouTube-style CTAs.
+- If input is already in {target_lang}, return it unchanged.
+- Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
+</rules>
+
+<input>
+{text}
+</input>
+""".strip()
+
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user}
+            ],
+            temperature=0.3,   # slightly higher for more natural phrasing
+            max_tokens=60
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("❌ Translation error:", e)
+        return text
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
