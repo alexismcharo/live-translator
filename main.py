@@ -4,12 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
-# --------------------- Setup ---------------------
+# basic setup and client
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# Pre-warm ffmpeg so the first request is not slow.
+# pre-warm ffmpeg so the first request isn't slow
 try:
     subprocess.run(
         ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5", "-ar", "16000", "-ac", "1", "-y", "/tmp/warm.wav"],
@@ -19,7 +19,7 @@ try:
 except:
     pass
 
-# Whisper model
+# load whisper once
 model = whisper.load_model("large-v3")
 try:
     model.transcribe("/tmp/warm.wav", language="en", fp16=True)
@@ -32,21 +32,22 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --------------------- Filters (exact-match thank-you; original CTA) ---------------------
+# tiny context buffers for current-line translation only
+recent_src_segments: list[str] = []
+recent_targets: list[str] = []
+MAX_SRC_CTX = 3
+MAX_RECENT = 10
 
-# Exact short interjections only (and standalone "you")
+# exact short interjections only (and standalone "you")
 THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
 
 def is_interjection_thanks(text: str) -> bool:
-    """
-    True only for pure short 'thank you' style interjections or a standalone 'you'.
-    Does NOT match longer sentences like 'thank you for coming' or 'you should...'.
-    """
+    # only treat pure short interjections or a lone "you" as thank-you lines
     if not text:
         return False
     return bool(THANKS_RE.match(text.strip()))
 
-# CTA patterns (same idea as your original examples)
+# CTA patterns (keep these as hard filters)
 _CTA_PATTERNS = [
     r'(?i)\blike (?:and )?subscribe\b',
     r'(?i)\bshare (?:this|the) (?:video|stream)\b',
@@ -60,7 +61,6 @@ _CTA_PATTERNS = [
 ]
 
 def is_cta_like(text: str) -> bool:
-    """Returns True if the line contains a CTA phrase from the list above."""
     if not text or len(text.strip()) < 2:
         return False
     for pat in _CTA_PATTERNS:
@@ -68,28 +68,32 @@ def is_cta_like(text: str) -> bool:
             return True
     return False
 
-# --------------------- Translation (default-only) ---------------------
-
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
-    """
-    Translate a single ASR segment into natural, live-caption style.
-    No context merging or dedupe logic here.
-    """
+    # use a small source + target tail only to help this line (no previous-line updates)
+    source_context = " ".join(recent_src_segments[-MAX_SRC_CTX:])
+    recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
+
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
+Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using context only to disambiguate and avoid repetition.
 </goal>
+
+<context_use>
+- Use <source_context> to resolve continuations or ambiguous references.
+- Do not re-translate content already fully covered in <recent_target> unless the new input adds substantive information.
+- If the current input repeats a clause from <source_context>, keep it once in the cleanest form.
+</context_use>
 
 <priorities>
 1) Preserve meaning faithfully; do not invent content.
 2) Prefer natural phrasing over literal word order when safe.
-3) Mirror completeness: if input is a fragment, output a natural fragment.
+3) Mirror completeness: if input is a fragment, output a natural fragment (do not guess endings).
 4) Keep numbers as digits; preserve names and units verbatim.
 5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone.
-6) If a phrase repeats with no new info (including ASR restarts), keep it only once.
-7) If the input is already {target_lang}, return it unchanged.
-8) If the input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
+6) If a phrase repeats with no new info (including overlap/restarts), keep it only once.
+7) If input is already {target_lang}, return it unchanged.
+8) If input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
 9) Preserve mood/person; do not convert first-person statements into imperatives.
 </priorities>
 
@@ -97,6 +101,14 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 - Tone: clear, concise, speech-like.
 - Punctuation: minimal but natural for captions.
 </style_targets>
+
+<source_context>
+{source_context}
+</source_context>
+
+<recent_target>
+{recent_target_str}
+</recent_target>
 
 <examples_positive>
 <input>I want to … check whether it actually improves the translation quality.</input>
@@ -115,28 +127,23 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 """.strip()
 
     try:
-        response = await client.chat.completions.create(
+        resp = await client.chat.completions.create(
             model="gpt-5",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            # Reasoning-style GPT-5: keep it minimal; sampling/penalties not supported.
             reasoning_effort="minimal",
             max_completion_tokens=140
         )
-        return (response.choices[0].message.content or "").strip()
+        return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print("Translation error:", e)
         return text
 
-# --------------------- HTTP ---------------------
-
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
-
-# --------------------- WebSocket ---------------------
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -164,7 +171,6 @@ async def websocket_endpoint(websocket: WebSocket):
             if not audio:
                 continue
 
-            # Transcode to WAV
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
                 raw.write(audio)
                 raw.flush()
@@ -194,27 +200,31 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     print("ASR:", src_text)
 
-                    # Skip short thank-you interjections entirely
                     if is_interjection_thanks(src_text):
-                        print("Skipped short thank-you interjection.")
+                        print("Skipped short thank-you interjection (source).")
                         continue
-
-                    # Skip CTA/meta filler lines entirely
                     if is_cta_like(src_text):
-                        print("Dropped CTA/meta filler (keyword).")
+                        print("Dropped CTA/meta filler (source).")
                         continue
 
-                    # Translate this single chunk
                     segment_id = str(uuid.uuid4())
                     translated = await translate_text(src_text, source_lang, target_lang)
 
-                    # Apply the same filters post-translation as a safety net
                     if is_interjection_thanks(translated):
-                        print("Post-translation: skipped short thank-you interjection.")
+                        print("Skipped short thank-you interjection (target).")
                         continue
                     if is_cta_like(translated):
-                        print("Post-translation: dropped CTA/meta filler.")
+                        print("Dropped CTA/meta filler (target).")
                         continue
+
+                    # update tiny context buffers only when emitting
+                    recent_src_segments.append(src_text)
+                    if len(recent_src_segments) > MAX_SRC_CTX * 3:
+                        recent_src_segments.pop(0)
+
+                    recent_targets.append(translated)
+                    if len(recent_targets) > MAX_RECENT:
+                        recent_targets.pop(0)
 
                     await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
