@@ -138,15 +138,13 @@ def looks_like_recent_duplicate(new_text: str, history: list[str],
 
 # --------------------- CTA / thank-you filtering ---------------------
 
+THANKS_RE = re.compile(r'(?i)^\s*(?:thank\s*you|thanks|thx)\s*[!.…]*\s*$')
+
 def is_interjection_thanks(text: str) -> bool:
-    """
-    True only for short interjections like "thanks" or "thank you".
-    Sentences that merely mention 'thank yous' should not match.
-    """
     if not text:
         return False
-    t = text.strip()
-    return bool(re.match(r'^(?i)\s*(thank\s*you|thanks|thx)\s*[!.…]*\s*$', t))
+    return bool(THANKS_RE.match(text.strip()))
+
 
 _CTA_PATTERNS = [
     r'(?i)\bsubscribe\b',
