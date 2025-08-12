@@ -130,6 +130,8 @@ Produce a natural, idiomatic {target_lang} caption for <previous>, updating it o
 - Resolve pronouns, names, tense, or ellipsis only if <current> makes them clear.
 - Remove filler like uh/um/えっと/あの unless meaningful.
 - Keep numbers as digits and preserve proper nouns/terminology.
+- Avoid repeating the same sentence or phrase in the output unless the repetition is clearly meaningful or adds emphasis in the source.
+- If repetition exists but only slightly changes wording, merge it into one clean, natural sentence.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
 
@@ -153,6 +155,8 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
 - Keep numbers as digits; preserve names, technical terms, and units.
 - Do not add greetings/sign-offs/explanations or YouTube-style CTAs.
 - If input is already in {target_lang}, return it unchanged.
+- Avoid repeating the same sentence or phrase in the output unless the repetition is clearly meaningful or adds emphasis in the source.
+- If repetition exists but only slightly changes wording, merge it into one clean, natural sentence.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
 
