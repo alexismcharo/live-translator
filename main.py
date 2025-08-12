@@ -120,8 +120,8 @@ def dedupe_repeated_ngrams(text: str, n: int = 3, min_run_chars: int = 6) -> str
 # --------------------- Cross-line near-duplicate guard ---------------------
 
 def looks_like_recent_duplicate(new_text: str, history: list[str],
-                                ratio_threshold: float = 0.82,
-                                contain_threshold: float = 0.80) -> bool:
+                                ratio_threshold: float = 0.9,
+                                contain_threshold: float = 0.9) -> bool:
     norm_new = _normalize_for_compare(new_text)
     if not norm_new:
         return False
