@@ -28,35 +28,76 @@ client = openai.AsyncOpenAI(api_key=api_key)
 # ──────────────────────────────────────────────────────────────────────────────
 def safe_output_text(resp) -> str:
     """
-    Robustly extract text from a Responses API object.
-    Works with both final non-stream responses and stream finalization objects.
+    Extract text from Responses API results across shapes:
+    - resp.output_text (when present)
+    - resp.output[i].text (string)
+    - resp.output[i].content[*].text.value (common GPT-5 shape)
     """
+    def grab_text_val(x):
+        # direct string
+        if isinstance(x, str):
+            return x
+        # pydantic-like object with .value or .text
+        for attr in ("value", "text"):
+            v = getattr(x, attr, None)
+            if isinstance(v, str) and v.strip():
+                return v
+            # nested object with .value (e.g., x.text.value)
+            if hasattr(v, "value") and isinstance(v.value, str) and v.value.strip():
+                return v.value
+        # dict fallback
+        if hasattr(x, "model_dump"):
+            d = x.model_dump()
+        elif isinstance(x, dict):
+            d = x
+        else:
+            d = None
+        if isinstance(d, dict):
+            v = d.get("value") or d.get("text") or d.get("input_text")
+            if isinstance(v, str) and v.strip():
+                return v
+            if isinstance(v, dict):
+                vv = v.get("value") or v.get("text")
+                if isinstance(vv, str) and vv.strip():
+                    return vv
+        return ""
+
     if not resp:
         return ""
+
+    # 1) happy path when SDK exposes output_text
     txt = getattr(resp, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt.strip()
 
+    # 2) scan output array
     out = []
     output = getattr(resp, "output", []) or []
     for item in output:
+        # some SDKs put direct .text on items
         it_text = getattr(item, "text", None)
         if isinstance(it_text, str) and it_text:
             out.append(it_text)
+
+        # most GPT-5 responses: message items with content parts
         content = getattr(item, "content", []) or []
-        for c in content:
-            t = getattr(c, "text", None) or getattr(c, "input_text", None)
-            if isinstance(t, str) and t:
-                out.append(t)
+        for part in content:
+            t = getattr(part, "text", None) or getattr(part, "input_text", None)
+            val = grab_text_val(t)
+            if val:
+                out.append(val)
+
     if out:
         return "".join(out).strip()
 
+    # 3) final fallbacks
     for attr in ("message", "content", "text"):
         val = getattr(resp, attr, None)
         if isinstance(val, str) and val.strip():
             return val.strip()
 
     return ""
+
 
 def looks_japanese(s: str) -> bool:
     return any(0x3040 <= ord(ch) <= 0x30FF or 0x4E00 <= ord(ch) <= 0x9FFF for ch in s)
@@ -312,17 +353,52 @@ async def refine_previous(prev_text: str, curr_text: str,
     return None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Streaming (GPT-5 new event types supported)  ← CHANGED
+# Streaming 
 # ──────────────────────────────────────────────────────────────────────────────
 async def stream_translate(websocket: WebSocket, text: str,
                            source_lang: str, target_lang: str) -> str:
     """
-    Stream translation with GPT-5. Supports both legacy delta events and the
-    newer response.output_item.* events. If stream yields nothing, use non-stream
-    fallback, then enforced retry. Also rejects GPT-side hallucinations by retrying.
+    GPT-5 streaming that supports both legacy text deltas and
+    response.output_item.{added,done} events. Falls back to non-stream & enforces.
+    Also runs the hallucination check on the translation before emitting.
     """
     final_text = ""
     types_seen = set()
+
+    def append_from_output_item(event, buf):
+        # event.item may be a 'message' with content parts -> .text.value
+        item = getattr(event, "item", None)
+        if not item:
+            return
+        # 1) message with content parts
+        content = getattr(item, "content", None)
+        if content:
+            try:
+                for part in content:
+                    # part.text may be str OR object with .value
+                    part_text = getattr(part, "text", None) or getattr(part, "input_text", None)
+                    if isinstance(part_text, str) and part_text:
+                        buf.append(part_text)
+                    else:
+                        v = getattr(part_text, "value", None) or getattr(part_text, "text", None)
+                        if isinstance(v, str) and v:
+                            buf.append(v)
+                        elif hasattr(part_text, "model_dump"):
+                            d = part_text.model_dump()
+                            vv = d.get("value") or d.get("text")
+                            if isinstance(vv, str) and vv:
+                                buf.append(vv)
+            except Exception:
+                pass
+        # 2) output_text item form: event.item.output_text.text.value
+        ot = getattr(item, "output_text", None)
+        if ot is not None:
+            # ot may have .text or .value
+            tv = getattr(ot, "text", None)
+            if isinstance(tv, str) and tv:
+                buf.append(tv)
+            elif hasattr(tv, "value") and isinstance(tv.value, str):
+                buf.append(tv.value)
 
     try:
         buf = []
@@ -341,34 +417,28 @@ async def stream_translate(websocket: WebSocket, text: str,
                 etype = getattr(event, "type", "") or ""
                 types_seen.add(etype)
 
-                # 1) Legacy: delta/text on the event itself
-                delta = getattr(event, "delta", None)
-                if isinstance(delta, str) and delta:
-                    buf.append(delta)
-                else:
-                    t = getattr(event, "text", None)
-                    if isinstance(t, str) and t:
-                        buf.append(t)
+                # Legacy: response.output_text.delta / response.text.delta
+                if etype.endswith(".text.delta") or etype.endswith("output_text.delta"):
+                    delta = getattr(event, "delta", None)
+                    if isinstance(delta, str) and delta:
+                        buf.append(delta)
 
-                # 2) GPT-5: response.output_item.{added,done} carry the text
+                # New: response.output_item.{added,done}
                 if etype.startswith("response.output_item."):
-                    item = getattr(event, "item", None)
-                    content = getattr(item, "content", None) if item is not None else None
-                    # content is typically a list of parts, each may have .text or dict-like
-                    if content:
-                        try:
-                            for part in content:
-                                part_text = getattr(part, "text", None)
-                                if isinstance(part_text, str) and part_text:
-                                    buf.append(part_text)
-                                elif isinstance(part_text, dict):
-                                    v = part_text.get("value") or part_text.get("text") or ""
-                                    if v:
-                                        buf.append(v)
-                        except Exception:
-                            pass
+                    append_from_output_item(event, buf)
 
-                # Partial send throttle
+                # Also: response.output_text.done sometimes carries the full text
+                if etype.endswith("output_text.done"):
+                    ot = getattr(event, "output_text", None)
+                    # try ot.text.value then ot.text
+                    if ot is not None:
+                        tv = getattr(ot, "text", None)
+                        if hasattr(tv, "value") and isinstance(tv.value, str) and tv.value:
+                            buf.append(tv.value)
+                        elif isinstance(tv, str) and tv:
+                            buf.append(tv)
+
+                # Throttle partials
                 s = "".join(buf)
                 if s:
                     now = time.monotonic()
@@ -376,17 +446,14 @@ async def stream_translate(websocket: WebSocket, text: str,
                         await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
                         last_partial_ts = now
 
-            # Finalization — GPT-5 may deliver only here
+            # Finalization — get text even if no deltas arrived
             final_resp = await stream.get_final_response()
-            final_text = "".join(buf).strip()
-            if not final_text:
-                final_text = safe_output_text(final_resp) or ""
+            final_text = "".join(buf).strip() or safe_output_text(final_resp) or ""
 
     except Exception as e:
         print("❌ stream_translate error:", e)
 
     if not final_text:
-        # Non-streaming fallback
         print(f"⚠️ stream empty — types_seen={sorted(types_seen)}; trying non-stream")
         try:
             resp = await client.responses.create(
@@ -401,7 +468,7 @@ async def stream_translate(websocket: WebSocket, text: str,
         except Exception as e:
             print("❌ non-streaming fallback error:", e)
 
-    # catch GPT-side hallucinations in the translation itself
+    # Guard against GPT-side filler/hallucination in the translation
     try:
         if final_text and await hallucination_check(final_text):
             print("🧠 GPT translation flagged as hallucination — retrying literal enforcement")
@@ -411,7 +478,7 @@ async def stream_translate(websocket: WebSocket, text: str,
     except Exception as e:
         print("⚠️ hallucination_check on translation failed:", e)
 
-    # Enforce language if needed
+    # Enforce target language
     if not final_text or violates_target_lang(final_text, target_lang):
         print("⚠️ enforcing target language (current segment)…")
         enforced = await translate_text_enforced(text, source_lang, target_lang)
@@ -424,6 +491,7 @@ async def stream_translate(websocket: WebSocket, text: str,
 
     await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
     return final_text
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # WebSocket
