@@ -216,7 +216,7 @@ Segment:
 Answer with exactly YES or NO.
 """.strip()
 
-        result = await client.chat_completions.create(  # compatibility alias
+        result = await client.chat.completions.create(  
             model="gpt-5",
             messages=[
                 {"role": "system", "content": system},
@@ -224,7 +224,6 @@ Answer with exactly YES or NO.
             ],
             reasoning_effort="minimal",
             verbosity="low",
-            timeout=10
         )
         out = (result.choices[0].message.content or "").strip().upper()
         return out == "YES"
@@ -303,7 +302,7 @@ Aim for natural, idiomatic speech. If this segment largely repeats earlier trans
 """.strip()
 
     try:
-        response = await client.chat_completions.create(
+        response = await client.chat.completions.create(
             model="gpt-5",
             messages=[
                 {"role": "system", "content": system},
@@ -311,7 +310,6 @@ Aim for natural, idiomatic speech. If this segment largely repeats earlier trans
             ],
             reasoning_effort="minimal",
             verbosity="low",
-            timeout=12
         )
         raw = (response.choices[0].message.content or "").strip()
         if mode == "context":
