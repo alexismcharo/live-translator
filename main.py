@@ -92,7 +92,7 @@ def strip_overlap(prev_src_tail: str, curr_src: str, window_words: int = 30, min
 
 # --------------------- In-line de-dupe (single translation) ---------------------
 
-def dedupe_repeated_ngrams(text: str, n: int = 3, min_run_chars: int = 6) -> str:
+def dedupe_repeated_ngrams(text: str, n: int = 3, min_run_chars: int = 4) -> str:
     """
     Remove adjacent duplicate n-gram runs such as "included ... included".
     """
@@ -120,8 +120,8 @@ def dedupe_repeated_ngrams(text: str, n: int = 3, min_run_chars: int = 6) -> str
 # --------------------- Cross-line near-duplicate guard ---------------------
 
 def looks_like_recent_duplicate(new_text: str, history: list[str],
-                                ratio_threshold: float = 0.85,
-                                contain_threshold: float = 0.85) -> bool:
+                                ratio_threshold: float = 0.80,
+                                contain_threshold: float = 0.80) -> bool:
     norm_new = _normalize_for_compare(new_text)
     if not norm_new:
         return False
@@ -186,7 +186,7 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
     Produce natural, live-caption style translations with minimal flicker.
     Polishes for idiomatic phrasing while preserving meaning and completeness.
     """
-    # Recent target memory (assumes globals recent_targets, MAX_RECENT exist)
+    # Recent target memory 
     recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
 
     if mode == "context":
@@ -198,38 +198,54 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
         )
         user = f"""
 <goal>
-Return a single, natural, idiomatic {target_lang} line that preserves the meaning of <previous>,
-optionally using <current> for disambiguation. Improve fluency, word choice, and rhythm.
+Return ONE natural {target_lang} line for <previous>. Use <current> only to clarify or complete it.
 </goal>
 
 <completion_policy>
-- If <previous> is an unfinished clause and <current> clearly provides the missing part,
-  merge into a single, natural complete sentence.
-- Otherwise, keep <previous> as a natural fragment (do not invent endings).
-- Preserve mood/person from the source (do NOT turn 1st-person statements into imperatives).
-- Remove exact or near-duplicate phrases that appear in both <previous> and <current> due to ASR overlap; keep the clearest version once in the most natural position.
-- Compress clause restarts and self-corrections without changing mood or meaning.
-- Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) that add no meaning.
+- Complete ONLY if <current> clearly finishes <previous>. If not obvious, keep <previous> as a natural fragment.
+- Preserve mood/person from source. Do NOT turn 1st-person statements into imperatives.
+- Remove exact or near-duplicate wording that appears in both <previous> and <current> (ASR overlap). Keep the clearest version once in the best position.
+- Compress clause restarts and self-corrections without changing meaning.
+- Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) with no meaning.
 </completion_policy>
 
 <priorities>
 1) Faithful meaning > natural flow > brevity.
-2) Prefer common collocations and paraphrases over literal word order.
-3) Avoid repeating lines already present in <recent_target>.
-4) Avoid repeating the same phrase, clause, or object more than once in the final output unless repetition is clearly intentional in the source.
-5) If <previous> is a heading, label, or title, preserve its non-sentence style when merging or refining.
-6) Preserve the type of fragment: if it’s a heading, keep heading style; if it’s a spoken clause, smooth into natural spoken language.
+2) Prefer common collocations over source word order.
+3) Do NOT repeat the same phrase, clause, or object more than once unless the source clearly intends emphasis.
+4) Avoid repeating lines already in <recent_target>.
+5) If <previous> is a heading/label/title, preserve that non-sentence style (don’t narrativize).
+6) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
 </priorities>
 
 <language_tips>
-- Japanese: prefer everyday phrasing; smooth particles; avoid stiff calques; naturalize set phrases.
-- English: prefer contractions and common phrasing; avoid source-language word order when awkward.
+- Japanese: everyday phrasing; smooth particles; avoid calques; naturalize set phrases.
+- English: use contractions and common phrasing; avoid source-like punctuation/order when awkward.
 </language_tips>
 
 <forbidden>
 - Adding information not implied by <previous> or <current>.
-- Glosses, brackets, notes, quotes, or explanations. Output text only.
+- Explanations, notes, quotes, brackets. Output text only.
 </forbidden>
+
+<examples>
+<previous>I want to</previous>
+<current>check whether it actually improves the translation quality.</current>
+<output>I want to check whether it actually improves the translation quality.</output>
+
+<previous>Translation when there’s</previous>
+<current>fragments involved.</current>
+<output>Translation when there are fragments involved</output>  <!-- heading preserved -->
+
+<previous>…prohibiting Levin from interfering</previous>
+<current>…prohibiting Levin from interfering with Baharav-Miara’s duties.</current>
+<output>…prohibiting Levin from interfering with Baharav-Miara’s duties.</output>  <!-- deduped -->
+</examples>
+
+<merge_test>
+Merge only if replacing <previous> with the result does not lose meaning and does not introduce repeated clauses.
+If unsure, do not merge.
+</merge_test>
 
 <recent_target>
 {recent_target_str}
@@ -250,30 +266,31 @@ optionally using <current> for disambiguation. Improve fluency, word choice, and
         )
         user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} that reads like a native speaker wrote it.
+Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 </goal>
 
 <priorities>
 1) Preserve meaning faithfully; do not invent content.
-2) Prefer natural phrasing over literal word order when safe.
+2) Prefer natural phrasing over literal order when safe.
 3) Mirror completeness: if input is a fragment, output a natural fragment.
-4) Remove pure fillers (uh/um/えっと) unless they convey hesitation or tone that matters.
-5) Keep numbers as digits; preserve names and units verbatim.
-6) If a phrase repeats with no new info — including exact or near-duplicate wording from ASR overlap or restarts — keep it only once in its clearest form.
-7) If input is already in {target_lang}, return it unchanged.
-8) If input is a label, title, heading, or meta comment, translate it as such without turning it into a full sentence.
+4) Keep numbers as digits; preserve names and units verbatim.
+5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone.
+6) If a phrase repeats with no new info — including exact or near-duplicate wording from ASR overlap/restarts — keep it only once in its clearest form.
+7) If the input is already {target_lang}, return it unchanged.
+8) If the input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
+9) Preserve mood/person; do NOT convert 1st-person statements into imperatives.
 </priorities>
 
 <language_tips>
-- Japanese: prefer everyday collocations; avoid stiff 「〜することができる」 when 「〜できる」 is natural;
-  drop unnecessary subjects; choose particles for smoothness; avoid calques.
-- English: use contractions, natural verbs, and common collocations; avoid source-language punctuation/order when awkward.
+- Japanese: prefer everyday collocations; use 「〜できる」 over stiff 「〜することができる」; drop unnecessary subjects; pick particles for smoothness; avoid calques.
+- English: use contractions and common collocations; avoid source-language punctuation/order when awkward.
 </language_tips>
 
 <style_targets>
 - Tone: clear, concise, speech-like.
 - Punctuation: minimal but natural for captions.
 </style_targets>
+
 
 <recent_target>
 {recent_target_str}
@@ -416,7 +433,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     if len(transcript_history) >= 2:
                         prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                         improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
+                        
+                        # --- Context update duplication guard ---
+                        original_translation = next((t for tid, t in zip(
+                            [x[0] for x in transcript_history], recent_targets) 
+                            if tid == transcript_history[-2][0]), None)
+                        
+                        if original_translation and looks_like_recent_duplicate(improved, [original_translation]):
+                            print("Skipped context update: near-duplicate of existing output.")
+                        else:
+                            await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
+
 
     except Exception as e:
         print("WebSocket error:", e)
