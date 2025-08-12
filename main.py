@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid, re
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -32,11 +32,48 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# --------------------- Translation ---------------------
+# --------------------- Filters (exact-match thank-you; original CTA) ---------------------
+
+# Exact short interjections only (and standalone "you")
+THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
+
+def is_interjection_thanks(text: str) -> bool:
+    """
+    True only for pure short 'thank you' style interjections or a standalone 'you'.
+    Does NOT match longer sentences like 'thank you for coming' or 'you should...'.
+    """
+    if not text:
+        return False
+    return bool(THANKS_RE.match(text.strip()))
+
+# CTA patterns (same idea as your original examples)
+_CTA_PATTERNS = [
+    r'(?i)\blike (?:and )?subscribe\b',
+    r'(?i)\bshare (?:this|the) (?:video|stream)\b',
+    r'(?i)\bhit (?:the )?bell\b',
+    r'(?i)\bturn on notifications?\b',
+    r'(?i)\blink in (?:the )?(?:bio|description)\b',
+    r'(?i)\bsee you (?:next time|in the next|tomorrow)\b',
+    r"(?i)\bthanks for watching\b",
+    r"(?i)\bthat's (?:it|all) for (?:today|now)\b",
+    r'(?i)\bsmash (?:that )?like\b',
+]
+
+def is_cta_like(text: str) -> bool:
+    """Returns True if the line contains a CTA phrase from the list above."""
+    if not text or len(text.strip()) < 2:
+        return False
+    for pat in _CTA_PATTERNS:
+        if re.search(pat, text):
+            return True
+    return False
+
+# --------------------- Translation (default-only) ---------------------
+
 async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     """
-    Default-only: translate a single ASR segment into natural, live-caption style.
-    No context merging or post-dedupe.
+    Translate a single ASR segment into natural, live-caption style.
+    No context merging or dedupe logic here.
     """
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
@@ -84,8 +121,9 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            # Reasoning-style GPT-5: keep it minimal; sampling/penalties not supported.
             reasoning_effort="minimal",
-            max_completion_tokens=160
+            max_completion_tokens=140
         )
         return (response.choices[0].message.content or "").strip()
     except Exception as e:
@@ -93,11 +131,13 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
         return text
 
 # --------------------- HTTP ---------------------
+
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
 # --------------------- WebSocket ---------------------
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -137,7 +177,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     except:
                         continue
 
-                    # ASR (no context conditioning changes here)
                     result = model.transcribe(
                         wav.name,
                         fp16=True,
@@ -155,9 +194,27 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     print("ASR:", src_text)
 
-                    # Translate this single chunk (default-only)
+                    # Skip short thank-you interjections entirely
+                    if is_interjection_thanks(src_text):
+                        print("Skipped short thank-you interjection.")
+                        continue
+
+                    # Skip CTA/meta filler lines entirely
+                    if is_cta_like(src_text):
+                        print("Dropped CTA/meta filler (keyword).")
+                        continue
+
+                    # Translate this single chunk
                     segment_id = str(uuid.uuid4())
                     translated = await translate_text(src_text, source_lang, target_lang)
+
+                    # Apply the same filters post-translation as a safety net
+                    if is_interjection_thanks(translated):
+                        print("Post-translation: skipped short thank-you interjection.")
+                        continue
+                    if is_cta_like(translated):
+                        print("Post-translation: dropped CTA/meta filler.")
+                        continue
 
                     await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
