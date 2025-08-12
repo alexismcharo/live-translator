@@ -122,7 +122,7 @@ async def hallucination_check(text: str) -> bool:
                 {"role":"system","content":"Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
                 {"role":"user","content":prompt}
             ],
-            temperature=0, top_p=0, max_tokens=1
+            temperature=0, top_p=0, max_completion_tokens=1
         )
         return (res.choices[0].message.content or "").strip().upper() == "YES"
     except Exception:
@@ -157,7 +157,7 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
             model="gpt-5",
             messages=[{"role":"system","content":system_prompt},
                       {"role":"user","content":user_prompt}],
-            temperature=0.2, max_tokens=200
+            temperature=0.2, max_completion_tokens=200
         )
         out = (resp.choices[0].message.content or "").strip()
         if target_lang == "Japanese" and not looks_japanese(out):
@@ -166,7 +166,7 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
                 messages=[{"role":"system","content":system_prompt},
                           {"role":"user","content":
                            f"STRICT: Output the Japanese translation ONLY (kanji/kana). No English, no romaji.\n\n{source_for_retry}"}],
-                temperature=0.1, max_tokens=200
+                temperature=0.1, max_completion_tokens=200
             )
             cand = (retry.choices[0].message.content or "").strip()
             if looks_japanese(cand):
@@ -194,7 +194,7 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
             model="gpt-5",
             messages=[{"role":"system","content":system_prompt},
                       {"role":"user","content":user_prompt}],
-            temperature=0.2, max_tokens=200, stream=True,
+            temperature=0.2, max_completion_tokens=200, stream=True,
         )
         buf, last = [], time.monotonic()
         async for chunk in stream:
