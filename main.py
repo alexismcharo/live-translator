@@ -202,10 +202,22 @@ Return a single, natural, idiomatic {target_lang} line that preserves the meanin
 optionally using <current> for disambiguation. Improve fluency, word choice, and rhythm.
 </goal>
 
+<completion_policy>
+- If <previous> is an unfinished clause and <current> clearly provides the missing part, 
+  merge into a single, natural complete sentence.
+- Otherwise, keep <previous> as a natural fragment (do not invent endings).
+- Preserve mood/person from the source (do NOT turn 1st-person statements into imperatives).
+- Compress clause restarts and self-corrections without changing mood or meaning.
+- Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) that add no meaning.
+</completion_policy>
+
 <priorities>
 1) Faithful meaning > natural flow > brevity.
 2) Prefer common collocations and paraphrases over literal word order.
 3) Avoid repeating lines already present in <recent_target>.
+4) If <previous> is a heading, label, or title, preserve its non-sentence style when merging or refining.
+5) Preserve the type of fragment: if it’s a heading, keep heading style; if it’s a spoken clause, smooth into natural spoken language.
+
 </priorities>
 
 <language_tips>
@@ -248,6 +260,7 @@ Produce fluent, idiomatic {target_lang} that reads like a native speaker wrote i
 5) Keep numbers as digits; preserve names and units verbatim.
 6) If a phrase repeats with no new info, keep it once.
 7) If input is already in {target_lang}, return it unchanged.
+8) If input is a label, title, heading, or meta comment, translate it as such without turning it into a full sentence.
 </priorities>
 
 <language_tips>
