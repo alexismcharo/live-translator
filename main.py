@@ -92,7 +92,7 @@ async def hallucination_check(text: str) -> bool:
                 {"role":"system","content":"Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
                 {"role":"user","content":prompt}
             ],
-            max_output_tokens=1
+            max_output_tokens=16
         )
         content = safe_output_text(resp)
         return (content or "").strip().upper() == "YES"
