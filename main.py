@@ -90,11 +90,13 @@ Answer with exactly YES or NO.
 """.strip()
 
         result = await client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
-            ]
+            ],
+            temperature=0,
+            max_tokens=1
         )
         out = (result.choices[0].message.content or "").strip().upper()
         return out == "YES"
@@ -159,11 +161,13 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-5",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
-            ]
+            ],
+            temperature=0.3,   # slightly higher for more natural phrasing
+            max_tokens=60
         )
         return (response.choices[0].message.content or "").strip()
     except Exception as e:
