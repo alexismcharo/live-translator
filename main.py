@@ -181,6 +181,7 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
         print("❌ translate_text error:", e)
         return ""
 
+# ---------------- Streaming translate (Responses API) ----------------
 async def stream_translate(websocket: WebSocket, text: str, source_lang: str, target_lang: str) -> str:
     system_prompt = (
         f"You are a professional {source_lang}↔{target_lang} translator.\n"
@@ -193,41 +194,34 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
         f"Return ONLY the {target_lang} translation."
     )
 
-    final_text = ""
-    buf = []
-    last = time.monotonic()
-
     try:
-        # Start streamed response
-        stream = await client.responses.stream(
+        buf, last = [], time.monotonic()
+
+        # async context manager + iterate events
+        async with client.responses.stream(
             model="gpt-5",
             input=[
-                {"role":"system","content":system_prompt},
-                {"role":"user","content":user_prompt}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
             max_output_tokens=200,
-        )
+        ) as stream:
 
-        async for event in stream:
-            et = getattr(event, "type", "")
-            if et == "response.output_text.delta":
-                delta = getattr(event, "delta", "") or ""
-                if not delta:
-                    continue
-                buf.append(delta)
-                s = "".join(buf)
-                now = time.monotonic()
-                if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
-                    await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
-                    last = now
-            elif et in ("response.error", "response.refusal.delta"):
-                # You could inspect event here; for now just continue collecting or break on fatal error
-                pass
-            elif et == "response.completed":
-                # Stream finished
-                break
+            async for event in stream:
+                et = getattr(event, "type", "")
+                if et == "response.output_text.delta":
+                    delta = getattr(event, "delta", "") or ""
+                    if not delta:
+                        continue
+                    buf.append(delta)
+                    s = "".join(buf)
+                    now = time.monotonic()
+                    if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
+                        await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
+                        last = now
 
-        final_text = "".join(buf).strip()
+            final_resp = await stream.get_final_response()
+            final_text = "".join(buf).strip() or (getattr(final_resp, "output_text", None) or "").strip()
 
         # Japanese strictness pass
         if target_lang == "Japanese" and not looks_japanese(final_text):
