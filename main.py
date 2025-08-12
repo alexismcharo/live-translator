@@ -34,13 +34,12 @@ except:
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# Tunables
+# Histories
+transcript_history = []  # [(segment_id, original_text)]
+recent_targets = []      # last few translated outputs only
 MAX_RECENT = 5
 MAX_TRANSCRIPTS = 200
 
@@ -99,8 +98,8 @@ def _is_fuzzy_duplicate(a: str, b: str,
 def collapse_repetition(text: str, *, fuzzy: bool = True) -> str:
     """
     Remove exact or near-exact repeated sentences/clauses.
-    - fuzzy=True: use near-duplicate checks (for initial lines).
-    - fuzzy=False: only drop exact duplicates (for minimal jumpiness).
+    - fuzzy=True: use near-duplicate checks (for initial [DONE] lines).
+    - fuzzy=False: only drop exact duplicates (for [UPDATE] to avoid jumpiness).
     """
     if not text:
         return text
@@ -128,54 +127,33 @@ def collapse_repetition(text: str, *, fuzzy: bool = True) -> str:
     cleaned = " ".join(kept)
     return cleaned.strip()
 
-# --------------------- Source-side de-stutter ---------------------
-
-def dedupe_source_fragments(s: str) -> str:
-    """Collapse trivial repeats from ASR like '...含まれます 手荷物が 含まれています'."""
-    if not s:
-        return s
-    # collapse immediate token repeats
-    tokens = re.split(r'(\s+)', s.strip())
-    out, prev = [], None
-    for t in tokens:
-        key = t.strip()
-        if key and prev and key == prev:
-            continue
-        out.append(t)
-        if key:
-            prev = key
-    s = "".join(out)
-    # remove trivially duplicated bigrams
-    s = re.sub(r'\b(\S+\s+\S+)\s+\1\b', r'\1', s, flags=re.IGNORECASE)
-    return s
-
-# --------------------- Emission controller ---------------------
+# --------------------- (NEW) Cross-emission repetition helpers ---------------------
+# minimal helpers to decide whether to drop/update/new
 
 def classify_relation(prev: str, curr: str):
     """
     Return 'drop' | 'update' | 'new' based on similarity/containment.
-    Patched so the very first caption is always NEW and containment
-    requires a non-trivial previous string.
+    Keeps first caption NEW; avoids spamming near-identical emits.
     """
     pa, ca = _normalize_text_for_compare(prev), _normalize_text_for_compare(curr)
     if not ca:
         return "drop"
-    if not pa:  # FIRST CAPTION → must be NEW
+    if not pa:  # first caption should be NEW
         return "new"
 
     r = difflib.SequenceMatcher(None, pa, ca).ratio()
     if r >= 0.96:
         return "drop"
-    # clear extension: previous must be at least 5 chars
+    # clear extension
     if len(pa) >= 5 and ca.startswith(pa) and len(ca) > len(pa) + 3:
         return "update"
-    # containment / superset with non-trivial prev
+    # containment / superset
     if len(pa) >= 5 and r >= 0.85 and pa in ca:
         return "update"
     return "new"
 
 def meaningfully_different(prev: str, new: str, ratio_thresh: float = 0.94) -> bool:
-    """Heuristic: is 'new' meaningfully different/better than 'prev'."""
+    """Return True if 'new' adds enough over 'prev' to warrant an UPDATE."""
     pa, na = _normalize_text_for_compare(prev), _normalize_text_for_compare(new)
     if not na:
         return False
@@ -250,12 +228,13 @@ Answer with exactly YES or NO.
         return False
 
 # --- Main translation function (natural, live-caption style) ---
-async def translate_text(text, source_lang, target_lang, *, recent_targets, mode="default"):
+async def translate_text(text, source_lang, target_lang, mode="default"):
     """
     Natural, idiomatic live captions; mirrors fragment completeness; minimal edits on refinements.
-    May return an empty string if there's no new information compared to recent targets.
     """
     target_register = "polite" if target_lang == "Japanese" else "neutral"
+
+    # recent targets for repetition control
     recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
 
     if mode == "context":
@@ -267,7 +246,6 @@ async def translate_text(text, source_lang, target_lang, *, recent_targets, mode
         user = f"""
 <task>
 Produce a natural, idiomatic {target_lang} caption for <previous>, updating it only if <current> clarifies meaning.
-If this largely repeats earlier content in <recent_target>, output only the new information; if there's nothing new, output nothing.
 </task>
 
 <recent_target>
@@ -275,7 +253,7 @@ If this largely repeats earlier content in <recent_target>, output only the new 
 </recent_target>
 
 <rules>
-- Output: ONLY the improved translation of <previous>. No quotes, no commentary; empty output is allowed if nothing new.
+- Output: ONLY the improved translation of <previous>. No quotes, no commentary.
 - Make phrasing natural in {target_lang} (not literal), but add no new information.
 - If <previous> was a fragment, keep it a natural fragment; don't invent endings.
 - Resolve pronouns, names, tense, or ellipsis only if <current> makes them clear.
@@ -296,8 +274,7 @@ If this largely repeats earlier content in <recent_target>, output only the new 
         )
         user = f"""
 <task>
-Translate a short, possibly incomplete ASR segment from {source_lang} to {target_lang} for live captions.
-Aim for natural, idiomatic speech. If this segment largely repeats earlier translated content in <recent_target>, output only the new information; if there's nothing new, output nothing.
+Translate a short, possibly incomplete ASR segment from {source_lang} to {target_lang} for live captions. Aim for natural, idiomatic speech.
 </task>
 
 <recent_target>
@@ -311,7 +288,7 @@ Aim for natural, idiomatic speech. If this segment largely repeats earlier trans
 - Keep numbers as digits; preserve names, technical terms, and units.
 - Do not add greetings/sign-offs/explanations or CTAs unless in source.
 - Avoid repeating sentences or phrases already present in <recent_target> unless they add new factual content.
-- If repetition occurs, merge into one concise, natural sentence. It is okay to return an empty string if nothing new.
+- If repetition occurs, merge into one concise, natural sentence.
 - If input is already in {target_lang}, return it unchanged.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
@@ -330,13 +307,14 @@ Aim for natural, idiomatic speech. If this segment largely repeats earlier trans
             verbosity="low"
         )
         raw = (response.choices[0].message.content or "").strip()
+        # Default path: fuzzy de-dupe; context path: exact-only de-dupe
         if mode == "context":
-            return collapse_repetition(raw, fuzzy=False)  # gentle on updates
+            return collapse_repetition(raw, fuzzy=False)
         else:
             return collapse_repetition(raw, fuzzy=True)
     except Exception as e:
         print("❌ Translation error:", e)
-        return ""
+        return text
 
 # --- WebSocket for streaming translation ---
 @app.websocket("/ws")
@@ -344,13 +322,9 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     print("🔌 WebSocket connected")
 
-    # Per-connection state (prevents cross-talk)
-    transcript_history = []   # [(segment_id, original_text)]
-    recent_targets = []       # last few translated outputs only
+    # minimal per-connection state for emission control only
     last_emitted_id = None
     last_emitted_text = ""
-    last_source_text = ""     # source text that produced last_emitted_text
-    processing = False
 
     try:
         settings = await websocket.receive_text()
@@ -368,33 +342,25 @@ async def websocket_endpoint(websocket: WebSocket):
             msg = await websocket.receive()
             if "bytes" not in msg:
                 continue
-            if processing:
-                # simple backpressure—drop this chunk if one is in flight
+
+            audio = msg["bytes"]
+            if not audio:
                 continue
-            processing = True
 
-            raw_path = wav_path = None
-            try:
-                audio = msg["bytes"]
-                if not audio:
-                    continue
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
-                    raw.write(audio)
-                    raw.flush()
-                    raw_path = raw.name
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
+                raw.write(audio)
+                raw.flush()
 
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
-                    wav_path = wav.name
                     try:
                         subprocess.run(
                             [
                                 "ffmpeg", "-y",
-                                "-i", raw_path,
-                                "-af", "silenceremove=1:0:-35dB",
+                                "-i", raw.name,
+                                "-af", "silenceremove=1:0:-40dB",
                                 "-ar", "16000",
                                 "-ac", "1",
-                                wav_path
+                                wav.name
                             ],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.PIPE,
@@ -404,10 +370,9 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
 
                     result = model.transcribe(
-                        wav_path,
+                        wav.name,
                         fp16=True,
                         temperature=0.0,
-                        # beam_size omitted (greedy implied with temperature=0.0)
                         condition_on_previous_text=True,
                         hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
@@ -416,110 +381,86 @@ async def websocket_endpoint(websocket: WebSocket):
                         logprob_threshold=-1.0
                     )
 
-                text = dedupe_source_fragments((result.get("text") or "").strip())
-                print("📝 Transcribed:", text)
-                if not text:
-                    continue
-
-                # ---------- Keep thank-you filter ----------
-                text_lower = text.lower()
-                if (
-                    "thank you" in text_lower
-                    or "thanks" in text_lower
-                    or "ありがとう" in text
-                    or "ありがとうございます" in text
-                    or "ありがと" in text
-                ):
-                    print("🚫 Skipping thank-you/ありがとう phrase:", text)
-                    continue
-                # ------------------------------------------
-
-                # GPT-based hallucination filter
-                try:
-                    if await hallucination_check(text):
-                        print("🧠 GPT flagged as broadcast/CTA filler:", text)
+                    text = (result.get("text") or "").strip()
+                    print("📝 Transcribed:", text)
+                    if not text:
                         continue
-                except Exception as e:
-                    print("⚠️ Hallucination check failed open (passing segment):", e)
 
-                # --- 1) Try context refinement of the LAST emitted caption using current source ---
-                refined_prev = ""
-                if last_emitted_id is not None and last_source_text:
-                    refined_prev = await translate_text(
-                        (last_source_text, text),
-                        source_lang, target_lang,
-                        recent_targets=recent_targets,
-                        mode="context"
-                    )
-                    refined_prev = collapse_repetition(refined_prev, fuzzy=False)  # gentle on updates
+                    # ---------- Keep thank-you filter ----------
+                    text_lower = text.lower()
+                    if (
+                        "thank you" in text_lower
+                        or "thanks" in text_lower
+                        or "ありがとう" in text
+                        or "ありがとうございます" in text
+                        or "ありがと" in text
+                    ):
+                        print("🚫 Skipping thank-you/ありがとう phrase:", text)
+                        continue
+                    # ------------------------------------------
 
-                # --- 2) Translate the CURRENT chunk normally ---
-                translated_now = await translate_text(
-                    text, source_lang, target_lang,
-                    recent_targets=recent_targets,
-                    mode="default"
-                )
+                    # GPT-based hallucination filter
+                    try:
+                        if await hallucination_check(text):
+                            print("🧠 GPT flagged as broadcast/CTA filler:", text)
+                            continue
+                    except Exception as e:
+                        print("⚠️ Hallucination check failed open (passing segment):", e)
 
-                # If context refinement produced a meaningful improvement over the last emission, UPDATE it.
-                if last_emitted_id is not None and refined_prev:
-                    if meaningfully_different(last_emitted_text, refined_prev):
-                        await websocket.send_text(
-                            f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': refined_prev})}"
-                        )
-                        # keep histories in sync
-                        if recent_targets:
-                            recent_targets[-1] = refined_prev
-                        else:
-                            recent_targets.append(refined_prev)
-                        last_emitted_text = refined_prev
-                        # Note: do NOT change last_source_text here
+                    # translate current segment
+                    translated = await translate_text(text, source_lang, target_lang)
 
-                # Decide how to handle the current translation relative to what we just showed.
-                if translated_now:
-                    action = classify_relation(last_emitted_text, translated_now)
-                    # SAFETY: update with no id → treat as new
+                    # minimal controller to reduce repetition across emissions
+                    action = classify_relation(last_emitted_text, translated)
                     if action == "update" and last_emitted_id is None:
-                        action = "new"
+                        action = "new"  # safety: cannot update without an id
 
-                    if action == "update":
-                        await websocket.send_text(
-                            f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated_now})}"
-                        )
+                    emitted_new = False
+
+                    if action == "drop":
+                        # send nothing (prevents flicker on near-identical text)
+                        continue
+                    elif action == "update":
+                        # update the current on-screen caption
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated})}")
+                        # keep histories aligned with what's visible
                         if recent_targets:
-                            recent_targets[-1] = translated_now
+                            recent_targets[-1] = translated
                         else:
-                            recent_targets.append(translated_now)
-                        last_emitted_text = translated_now
-                        # last_source_text stays as is
-
-                    elif action == "new":
+                            recent_targets.append(translated)
+                        last_emitted_text = translated
+                        # do NOT create a new id, so skip your context update below
+                    else:  # "new"
+                        # assign ID and send fresh caption (original behavior)
                         segment_id = str(uuid.uuid4())
                         transcript_history.append((segment_id, text))
                         if len(transcript_history) > MAX_TRANSCRIPTS:
                             transcript_history.pop(0)
 
-                        await websocket.send_text(
-                            f"[DONE]{json.dumps({'id': segment_id, 'text': translated_now})}"
-                        )
-                        last_emitted_id = segment_id
-                        last_emitted_text = translated_now
-                        last_source_text = text  # bind source that produced last emission
-                        recent_targets.append(translated_now)
+                        await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
+                        # store in recent target history (only [DONE] outputs)
+                        recent_targets.append(translated)
                         if len(recent_targets) > MAX_RECENT:
                             recent_targets.pop(0)
-                    # if action == "drop": do nothing
 
-            except Exception as e:
-                print("❌ WebSocket loop error:", e)
-            finally:
-                # cleanup temps and release processing gate
-                for p in (raw_path, wav_path):
-                    if p and os.path.exists(p):
-                        try:
-                            os.unlink(p)
-                        except:
-                            pass
-                processing = False
+                        # update last-emitted trackers
+                        last_emitted_id = segment_id
+                        last_emitted_text = translated
+                        emitted_new = True
+
+                    # only run your context refinement when a NEW line was emitted
+                    if emitted_new and len(transcript_history) >= 2:
+                        prev, curr = transcript_history[-2][1], transcript_history[-1][1]
+                        improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
+                        # avoid no-op update spam
+                        if meaningfully_different(last_emitted_text, improved):
+                            await websocket.send_text(
+                                f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': improved})}"
+                            )
+                            # align history & tracker with improved text
+                            if recent_targets:
+                                recent_targets[-1] = improved
+                            last_emitted_text = improved
 
     except Exception as e:
         print("❌ WebSocket error:", e)
