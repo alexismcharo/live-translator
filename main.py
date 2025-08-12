@@ -132,26 +132,82 @@ app.add_middleware(
 transcript_history = deque(maxlen=500)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Hallucination / Filler filter
+# Hallucination / Filler filter  (IMPROVED)
 # ──────────────────────────────────────────────────────────────────────────────
+_HALLU_PHRASES = [
+    # english CTA / video tropes
+    "welcome to my channel",
+    "thanks for watching",
+    "don't forget to subscribe",
+    "like and subscribe",
+    "click the bell",
+    "smash that like button",
+    "see you in the next video",
+    "in this video",
+    "today i will show you",
+    "i'm going to show you",
+    "hope you enjoy watching",
+    # jp equivalents (rough/common)
+    "チャンネル登録", "高評価よろしく", "この動画では", "本日はご紹介します", "最後までご覧ください",
+]
+
+def _excessive_repetition(text: str) -> bool:
+    """Detect obvious loops like 'I hope you will enjoy it.' repeated many times."""
+    import re
+    s = re.sub(r"\s+", " ", (text or "")).strip().lower()
+    if not s:
+        return False
+    # same sentence repeated ≥3 times
+    parts = re.split(r"[。！？\.\!\?]+", s)
+    parts = [p.strip() for p in parts if p.strip()]
+    if not parts:
+        return False
+    from collections import Counter
+    c = Counter(parts)
+    if any(v >= 3 and len(k) >= 8 for k, v in c.items()):
+        return True
+    # repeated 3–5-gram loops
+    words = re.findall(r"[a-zA-Z\u3040-\u30FF\u4E00-\u9FFF]+", s)
+    for n in (3, 4, 5):
+        grams = [" ".join(words[i:i+n]) for i in range(max(0, len(words)-n+1))]
+        cc = Counter(grams)
+        if any(v >= 3 and len(k) >= 8 for k, v in cc.items()):
+            return True
+    # very long + contains hallmark phrases
+    if len(s) > 300 and any(p in s for p in _HALLU_PHRASES):
+        return True
+    return False
+
+def _contains_hallu_phrase(text: str) -> bool:
+    s = (text or "").lower()
+    return any(p in s for p in _HALLU_PHRASES)
+
 async def hallucination_check(text: str) -> bool:
     """
-    Returns True if 'text' is generic filler/CTA to skip.
-    (min tokens >= 16; no temperature param)
+    Returns True if 'text' is generic filler/CTA or shows repetition/looping.
+    Heuristic pass first; if inconclusive, ask a tiny model.
     """
+    # Heuristics catch obvious junk quickly (no API call)
+    if _excessive_repetition(text) or _contains_hallu_phrase(text):
+        return True
+
+    # Model pass (YES/NO only). Keep >=16 tokens per GPT-5 Responses rules.
     try:
         prompt = (
-            "You are a strict, conservative classifier for filler/CTA phrases.\n"
-            "Say YES only for generic outros/engagement CTAs; otherwise NO.\n"
-            "Output YES or NO only.\n\nSentence:\n" + text
+            "You are a strict hallucination/filler detector for live captions.\n"
+            "Reply YES only if the sentence is a generic intro/outro/CTA (e.g., 'welcome to my channel', "
+            "'don't forget to subscribe', 'thanks for watching', 'in this video'), OR if it contains obvious "
+            "repetitive/looping filler. Otherwise reply NO.\n\n"
+            "Reply ONLY YES or NO.\n\n"
+            "Sentence:\n" + (text or "")
         )
         resp = await client.responses.create(
             model="gpt-5-nano",
             input=[
-                {"role": "system", "content": "Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "Return ONLY YES or NO."},
+                {"role": "user",   "content": prompt},
             ],
-            max_output_tokens=16  # GPT-5 responses API requires >= 16
+            max_output_tokens=32
         )
         content = (safe_output_text(resp) or "").strip().upper()
         if content.startswith("YES"):
@@ -209,7 +265,6 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
         out = safe_output_text(resp)
         if not out:
             print("⚠️ translate_text returned empty")
-        # Do NOT return tuples
         if not out and mode == "context":
             previous, _ = text
             return str(previous)
@@ -257,14 +312,14 @@ async def refine_previous(prev_text: str, curr_text: str,
     return None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Streaming (robust for GPT-5)
+# Streaming (GPT-5 new event types supported)  ← CHANGED
 # ──────────────────────────────────────────────────────────────────────────────
 async def stream_translate(websocket: WebSocket, text: str,
                            source_lang: str, target_lang: str) -> str:
     """
-    Stream translation with GPT-5, compatible with models that may emit no deltas.
-    If the stream yields nothing, use non-streaming fallback, then enforced retry.
-    Never returns empty.
+    Stream translation with GPT-5. Supports both legacy delta events and the
+    newer response.output_item.* events. If stream yields nothing, use non-stream
+    fallback, then enforced retry. Also rejects GPT-side hallucinations by retrying.
     """
     final_text = ""
     types_seen = set()
@@ -286,7 +341,7 @@ async def stream_translate(websocket: WebSocket, text: str,
                 etype = getattr(event, "type", "") or ""
                 types_seen.add(etype)
 
-                # Capture any event that carries text
+                # 1) Legacy: delta/text on the event itself
                 delta = getattr(event, "delta", None)
                 if isinstance(delta, str) and delta:
                     buf.append(delta)
@@ -295,11 +350,29 @@ async def stream_translate(websocket: WebSocket, text: str,
                     if isinstance(t, str) and t:
                         buf.append(t)
 
-                # Throttle partials by time / punctuation / token count
+                # 2) GPT-5: response.output_item.{added,done} carry the text
+                if etype.startswith("response.output_item."):
+                    item = getattr(event, "item", None)
+                    content = getattr(item, "content", None) if item is not None else None
+                    # content is typically a list of parts, each may have .text or dict-like
+                    if content:
+                        try:
+                            for part in content:
+                                part_text = getattr(part, "text", None)
+                                if isinstance(part_text, str) and part_text:
+                                    buf.append(part_text)
+                                elif isinstance(part_text, dict):
+                                    v = part_text.get("value") or part_text.get("text") or ""
+                                    if v:
+                                        buf.append(v)
+                        except Exception:
+                            pass
+
+                # Partial send throttle
                 s = "".join(buf)
                 if s:
                     now = time.monotonic()
-                    if s.endswith(("。", "、", ".", "!", "?", "！", "？")) or (now - last_partial_ts) > 0.18 or len(s.split()) >= 8:
+                    if s.endswith(("。","、",".","!","?","！","？")) or (now - last_partial_ts) > 0.18 or len(s.split()) >= 8:
                         await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
                         last_partial_ts = now
 
@@ -327,6 +400,16 @@ async def stream_translate(websocket: WebSocket, text: str,
             final_text = safe_output_text(resp) or ""
         except Exception as e:
             print("❌ non-streaming fallback error:", e)
+
+    # catch GPT-side hallucinations in the translation itself
+    try:
+        if final_text and await hallucination_check(final_text):
+            print("🧠 GPT translation flagged as hallucination — retrying literal enforcement")
+            retry = await translate_text_enforced(text, source_lang, target_lang)
+            if retry:
+                final_text = retry
+    except Exception as e:
+        print("⚠️ hallucination_check on translation failed:", e)
 
     # Enforce language if needed
     if not final_text or violates_target_lang(final_text, target_lang):
@@ -415,7 +498,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 print("🚫 Skipping thank-you:", text)
                 continue
 
-            # Filler/CTA classifier
+            # Filler/CTA classifier (source-side)
             try:
                 if await hallucination_check(text):
                     print("🧠 Skipping filler/hallucination:", text)
@@ -423,7 +506,7 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception as e:
                 print("⚠️ hallucination_check failed:", e)
 
-            # Trivial fragment filter (optional; comment out if you want every crumb)
+            # Trivial fragment filter
             if should_skip_fragment(text, source_lang):
                 print("🚫 Skipping trivial fragment:", text)
                 continue
