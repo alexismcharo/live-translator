@@ -116,15 +116,16 @@ async def hallucination_check(text: str) -> bool:
             "Say YES only for generic outros/engagement CTAs; otherwise NO.\n"
             "Output YES or NO only.\n\nSentence:\n" + text
         )
-        res = await client.chat.completions.create(
+        resp = await client.responses.create(
             model="gpt-5-nano",
-            messages=[
+            input=[
                 {"role":"system","content":"Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
                 {"role":"user","content":prompt}
             ],
-            temperature=0, top_p=0, max_completion_tokens=1
+            max_output_tokens=1
         )
-        return (res.choices[0].message.content or "").strip().upper() == "YES"
+        content = (getattr(resp, "output_text", None) or "").strip()
+        return content.upper() == "YES"
     except Exception:
         return False
 
@@ -153,22 +154,26 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
         source_for_retry = text if isinstance(text, str) else text[0]
 
     try:
-        resp = await client.chat.completions.create(
+        resp = await client.responses.create(
             model="gpt-5",
-            messages=[{"role":"system","content":system_prompt},
-                      {"role":"user","content":user_prompt}],
-            temperature=0.2, max_completion_tokens=200
+            input=[
+                {"role":"system","content":system_prompt},
+                {"role":"user","content":user_prompt}
+            ],
+            max_output_tokens=200
         )
-        out = (resp.choices[0].message.content or "").strip()
+        out = (getattr(resp, "output_text", None) or "").strip()
         if target_lang == "Japanese" and not looks_japanese(out):
-            retry = await client.chat.completions.create(
+            retry = await client.responses.create(
                 model="gpt-5",
-                messages=[{"role":"system","content":system_prompt},
-                          {"role":"user","content":
-                           f"STRICT: Output the Japanese translation ONLY (kanji/kana). No English, no romaji.\n\n{source_for_retry}"}],
-                temperature=0.1, max_completion_tokens=200
+                input=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":
+                     f"STRICT: Output the Japanese translation ONLY (kanji/kana). No English, no romaji.\n\n{source_for_retry}"}
+                ],
+                max_output_tokens=200
             )
-            cand = (retry.choices[0].message.content or "").strip()
+            cand = (getattr(retry, "output_text", None) or "").strip()
             if looks_japanese(cand):
                 out = cand
         return out
@@ -189,30 +194,42 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
     )
 
     final_text = ""
+    buf = []
+    last = time.monotonic()
+
     try:
-        stream = await client.chat.completions.create(
+        # Start streamed response
+        stream = await client.responses.stream(
             model="gpt-5",
-            messages=[{"role":"system","content":system_prompt},
-                      {"role":"user","content":user_prompt}],
-            temperature=0.2, max_completion_tokens=200, stream=True,
+            input=[
+                {"role":"system","content":system_prompt},
+                {"role":"user","content":user_prompt}
+            ],
+            max_output_tokens=200,
         )
-        buf, last = [], time.monotonic()
-        async for chunk in stream:
-            delta = ""
-            try:
-                delta = chunk.choices[0].delta.get("content") or ""
-            except:  # noqa: E722
+
+        async for event in stream:
+            et = getattr(event, "type", "")
+            if et == "response.output_text.delta":
+                delta = getattr(event, "delta", "") or ""
+                if not delta:
+                    continue
+                buf.append(delta)
+                s = "".join(buf)
+                now = time.monotonic()
+                if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
+                    await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
+                    last = now
+            elif et in ("response.error", "response.refusal.delta"):
+                # You could inspect event here; for now just continue collecting or break on fatal error
                 pass
-            if not delta:
-                continue
-            buf.append(delta)
-            s = "".join(buf)
-            now = time.monotonic()
-            if s.endswith(("。","、",".","!","?","！","？")) or (now-last)>0.18 or len(s.split())>=8:
-                await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
-                last = now
+            elif et == "response.completed":
+                # Stream finished
+                break
 
         final_text = "".join(buf).strip()
+
+        # Japanese strictness pass
         if target_lang == "Japanese" and not looks_japanese(final_text):
             print("ℹ️ stream_translate non-JP → strict retry")
             strict = await translate_text(text, source_lang, target_lang)
@@ -221,6 +238,7 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
 
         await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
         return final_text
+
     except Exception as e:
         print("❌ stream_translate error:", e)
         strict = await translate_text(text, source_lang, target_lang)
