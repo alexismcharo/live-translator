@@ -20,9 +20,24 @@ api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
 # ---------------- Utilities ----------------
-def looks_japanese(s: str) -> bool:
-    # Hiragana 3040–309F, Katakana 30A0–30FF, Kanji 4E00–9FFF
-    return any(0x3040 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in s or "")
+def safe_output_text(resp) -> str:
+    """
+    Robustly extract text from a Responses API object.
+    Falls back to walking resp.output[...] if output_text is missing.
+    """
+    txt = getattr(resp, "output_text", None)
+    if isinstance(txt, str) and txt.strip():
+        return txt.strip()
+
+    out = []
+    output = getattr(resp, "output", []) or []
+    for item in output:
+        content = getattr(item, "content", []) or []
+        for c in content:
+            t = getattr(c, "text", None) or getattr(c, "input_text", None)
+            if isinstance(t, str):
+                out.append(t)
+    return "".join(out).strip()
 
 # ------------- Warm FFMPEG & Whisper --------------
 WARMUP_WAV = "/tmp/warm.wav"
@@ -124,12 +139,12 @@ async def hallucination_check(text: str) -> bool:
             ],
             max_output_tokens=1
         )
-        content = (getattr(resp, "output_text", None) or "").strip()
+        content = safe_output_text(resp)
         return content.upper() == "YES"
     except Exception:
         return False
 
-# ---------------- Translation (strict JP enforcement) ----------------
+# ---------------- Translation ----------------
 async def translate_text(text, source_lang: str, target_lang: str, mode: str = "default"):
     system_prompt = (
         f"You are a professional {source_lang}↔{target_lang} translator.\n"
@@ -144,14 +159,12 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
             f"NEW ({source_lang}): {current}\n\n"
             f"Return ONLY the improved translation of PREVIOUS in {target_lang}."
         )
-        source_for_retry = previous
     else:
         user_prompt = (
             f"Translate from {source_lang} to {target_lang}.\n\n"
             f"Sentence:\n{text}\n\n"
             f"Return ONLY the {target_lang} translation."
         )
-        source_for_retry = text if isinstance(text, str) else text[0]
 
     try:
         resp = await client.responses.create(
@@ -162,20 +175,7 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
             ],
             max_output_tokens=200
         )
-        out = (getattr(resp, "output_text", None) or "").strip()
-        if target_lang == "Japanese" and not looks_japanese(out):
-            retry = await client.responses.create(
-                model="gpt-5",
-                input=[
-                    {"role":"system","content":system_prompt},
-                    {"role":"user","content":
-                     f"STRICT: Output the Japanese translation ONLY (kanji/kana). No English, no romaji.\n\n{source_for_retry}"}
-                ],
-                max_output_tokens=200
-            )
-            cand = (getattr(retry, "output_text", None) or "").strip()
-            if looks_japanese(cand):
-                out = cand
+        out = safe_output_text(resp)
         return out
     except Exception as e:
         print("❌ translate_text error:", e)
@@ -197,7 +197,7 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
     try:
         buf, last = [], time.monotonic()
 
-        # async context manager + iterate events
+        # Correct streaming pattern: async context manager + iterate events
         async with client.responses.stream(
             model="gpt-5",
             input=[
@@ -219,16 +219,12 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
                     if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
                         await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
                         last = now
+                # (optional) handle other event types as needed
 
             final_resp = await stream.get_final_response()
-            final_text = "".join(buf).strip() or (getattr(final_resp, "output_text", None) or "").strip()
-
-        # Japanese strictness pass
-        if target_lang == "Japanese" and not looks_japanese(final_text):
-            print("ℹ️ stream_translate non-JP → strict retry")
-            strict = await translate_text(text, source_lang, target_lang)
-            if looks_japanese(strict):
-                final_text = strict
+            final_text = "".join(buf).strip()
+            if not final_text:
+                final_text = safe_output_text(final_resp)
 
         await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
         return final_text
