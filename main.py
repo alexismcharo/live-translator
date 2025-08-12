@@ -203,10 +203,11 @@ optionally using <current> for disambiguation. Improve fluency, word choice, and
 </goal>
 
 <completion_policy>
-- If <previous> is an unfinished clause and <current> clearly provides the missing part, 
+- If <previous> is an unfinished clause and <current> clearly provides the missing part,
   merge into a single, natural complete sentence.
 - Otherwise, keep <previous> as a natural fragment (do not invent endings).
 - Preserve mood/person from the source (do NOT turn 1st-person statements into imperatives).
+- Remove exact or near-duplicate phrases that appear in both <previous> and <current> due to ASR overlap; keep the clearest version once in the most natural position.
 - Compress clause restarts and self-corrections without changing mood or meaning.
 - Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) that add no meaning.
 </completion_policy>
@@ -215,9 +216,9 @@ optionally using <current> for disambiguation. Improve fluency, word choice, and
 1) Faithful meaning > natural flow > brevity.
 2) Prefer common collocations and paraphrases over literal word order.
 3) Avoid repeating lines already present in <recent_target>.
-4) If <previous> is a heading, label, or title, preserve its non-sentence style when merging or refining.
-5) Preserve the type of fragment: if it’s a heading, keep heading style; if it’s a spoken clause, smooth into natural spoken language.
-
+4) Avoid repeating the same phrase, clause, or object more than once in the final output unless repetition is clearly intentional in the source.
+5) If <previous> is a heading, label, or title, preserve its non-sentence style when merging or refining.
+6) Preserve the type of fragment: if it’s a heading, keep heading style; if it’s a spoken clause, smooth into natural spoken language.
 </priorities>
 
 <language_tips>
@@ -258,7 +259,7 @@ Produce fluent, idiomatic {target_lang} that reads like a native speaker wrote i
 3) Mirror completeness: if input is a fragment, output a natural fragment.
 4) Remove pure fillers (uh/um/えっと) unless they convey hesitation or tone that matters.
 5) Keep numbers as digits; preserve names and units verbatim.
-6) If a phrase repeats with no new info, keep it once.
+6) If a phrase repeats with no new info — including exact or near-duplicate wording from ASR overlap or restarts — keep it only once in its clearest form.
 7) If input is already in {target_lang}, return it unchanged.
 8) If input is a label, title, heading, or meta comment, translate it as such without turning it into a full sentence.
 </priorities>
