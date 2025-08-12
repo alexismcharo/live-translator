@@ -147,19 +147,14 @@ def is_interjection_thanks(text: str) -> bool:
 
 
 _CTA_PATTERNS = [
-    r'(?i)\bsubscribe\b',
     r'(?i)\blike (?:and )?subscribe\b',
-    r'(?i)\blike\b',
-    r'(?i)\bfollow\b',
     r'(?i)\bshare (?:this|the) (?:video|stream)\b',
-    r'(?i)\bcomment\b',
     r'(?i)\bhit (?:the )?bell\b',
     r'(?i)\bturn on notifications?\b',
     r'(?i)\blink in (?:the )?(?:bio|description)\b',
     r'(?i)\bsee you (?:next time|in the next|tomorrow)\b',
     r"(?i)\bthanks for watching\b",
     r"(?i)\bthat's (?:it|all) for (?:today|now)\b",
-    r"(?i)\bdon't forget\b",
     r'(?i)\bsmash (?:that )?like\b',
 ]
 
