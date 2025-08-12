@@ -15,20 +15,62 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Setup
+# ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise RuntimeError("OPENAI_API_KEY not set")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# ---------------- Utilities ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+# --- trivial fragment filter---
+PRONOUNS_EN = {"you","i","me","we","they","he","she","it"}
+FILLER_EN   = {"uh","um","er","ah","oh","hmm","huh","uh-huh","nah","yep","nope","like"}
+PRONOUNS_JA = {"あなた","私","僕","俺","我々","彼","彼女"}
+FILLER_JA   = {"えっと","あの","うーん","えーと","まぁ","その"}
+
+def should_skip_fragment(text: str, source_lang: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+
+    # English: skip single-word pronouns/fillers
+    if source_lang == "English":
+        import re
+        words = re.findall(r"[A-Za-z]+", t.lower())
+        if len(words) == 1 and (words[0] in PRONOUNS_EN or words[0] in FILLER_EN):
+            return True
+        return False
+
+    # Japanese: skip very short aizuchi/fillers and lone pronouns
+    if source_lang == "Japanese":
+        # exact match on common fillers/pronouns
+        if t in FILLER_JA or t in PRONOUNS_JA:
+            return True
+        # very short kana-only interjections often aren’t useful alone
+        if len(t) <= 2 and any("ぁ" <= ch <= "ん" or "ァ" <= ch <= "ン" for ch in t):
+            return True
+        return False
+
+    return False
+
 def safe_output_text(resp) -> str:
     """
     Robustly extract text from a Responses API object.
-    Falls back to walking resp.output[...] if output_text is missing.
+    Works with both final non-stream responses and stream finalization objects.
     """
+    if not resp:
+        return ""
+    # Common attribute on new Responses API
     txt = getattr(resp, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt.strip()
 
+    # Scan typical containers
     out = []
     output = getattr(resp, "output", []) or []
     for item in output:
@@ -40,10 +82,10 @@ def safe_output_text(resp) -> str:
             t = getattr(c, "text", None) or getattr(c, "input_text", None)
             if isinstance(t, str) and t:
                 out.append(t)
-
     if out:
         return "".join(out).strip()
 
+    # Last resorts
     for attr in ("message", "content", "text"):
         val = getattr(resp, attr, None)
         if isinstance(val, str) and val.strip():
@@ -51,11 +93,30 @@ def safe_output_text(resp) -> str:
 
     return ""
 
-# ------------- Warm FFMPEG & Whisper --------------
+def looks_japanese(s: str) -> bool:
+    return any(0x3040 <= ord(ch) <= 0x30FF or 0x4E00 <= ord(ch) <= 0x9FFF for ch in s)
+
+def looks_english(s: str) -> bool:
+    return any(("A" <= ch <= "Z") or ("a" <= ch <= "z") for ch in s)
+
+def violates_target_lang(output: str, target_lang: str) -> bool:
+    out = (output or "").strip()
+    if not out:
+        return True
+    if target_lang == "Japanese":
+        return not looks_japanese(out)
+    if target_lang == "English":
+        return not looks_english(out)
+    return False
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Warm FFmpeg & Whisper
+# ──────────────────────────────────────────────────────────────────────────────
 WARMUP_WAV = "/tmp/warm.wav"
 try:
     subprocess.run(
-        ["ffmpeg","-f","lavfi","-i","anullsrc=r=16000:cl=mono","-t","0.5","-ar","16000","-ac","1","-y",WARMUP_WAV],
+        ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "0.5",
+         "-ar", "16000", "-ac", "1", "-y", WARMUP_WAV],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
     )
 except Exception:
@@ -67,7 +128,9 @@ try:
 except Exception:
     pass
 
-# ---------------- FastAPI ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# FastAPI
+# ──────────────────────────────────────────────────────────────────────────────
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -75,11 +138,18 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# Keep original (source) text history for contextual refinement: [(segment_id, original_text)]
+# Store original (source) text for context refinement
+# Each item: (segment_id, original_text)
 transcript_history = deque(maxlen=500)
 
-# ---------------- Hallucination / Filler Filter ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Hallucination / Filler filter
+# ──────────────────────────────────────────────────────────────────────────────
 async def hallucination_check(text: str) -> bool:
+    """
+    Returns True if 'text' is generic filler/CTA to skip.
+    NOTE: GPT-5 API now requires max_output_tokens >= 16.
+    """
     try:
         prompt = (
             "You are a strict, conservative classifier for filler/CTA phrases.\n"
@@ -89,18 +159,26 @@ async def hallucination_check(text: str) -> bool:
         resp = await client.responses.create(
             model="gpt-5-nano",
             input=[
-                {"role":"system","content":"Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
-                {"role":"user","content":prompt}
+                {"role": "system", "content": "Reply ONLY with YES or NO. Be conservative; unknowns default to NO."},
+                {"role": "user", "content": prompt},
             ],
-            max_output_tokens=16
+            max_output_tokens=16,     # ← fix: must be >= 16
+            temperature=0,
         )
-        content = safe_output_text(resp)
-        return (content or "").strip().upper() == "YES"
+        content = (safe_output_text(resp) or "").strip().upper()
+        # Be robust to any small deviations
+        if content.startswith("YES"):
+            return True
+        if content.startswith("NO"):
+            return False
+        return False
     except Exception as e:
         print("⚠️ hallucination_check error:", e)
         return False
 
-# ---------------- Translation ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Translation
+# ──────────────────────────────────────────────────────────────────────────────
 def translator_system_prompt(source_lang: str, target_lang: str) -> str:
     return (
         f"You are a professional {source_lang}↔{target_lang} translator.\n"
@@ -109,7 +187,18 @@ def translator_system_prompt(source_lang: str, target_lang: str) -> str:
         f"- Never return an empty string; if uncertain, translate literally."
     )
 
+def strict_user_prompt(text: str, source_lang: str, target_lang: str) -> str:
+    return (
+        f"Translate from {source_lang} to {target_lang}.\n\n"
+        f"Sentence:\n{text}\n\n"
+        f"Return ONLY the {target_lang} translation (no extra words)."
+    )
+
 async def translate_text(text, source_lang: str, target_lang: str, mode: str = "default") -> str:
+    """
+    Non-streaming translation. For mode='context', `text` is (previous, current).
+    NEVER returns tuples; only strings.
+    """
     if mode == "context":
         previous, current = text
         user_prompt = (
@@ -119,103 +208,166 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
             f"Return ONLY the improved translation of PREVIOUS in {target_lang}."
         )
     else:
-        user_prompt = (
-            f"Translate from {source_lang} to {target_lang}.\n\n"
-            f"Sentence:\n{text}\n\n"
-            f"Return ONLY the {target_lang} translation (no extra words)."
-        )
+        user_prompt = strict_user_prompt(text, source_lang, target_lang)
 
     try:
         resp = await client.responses.create(
             model="gpt-5",
             input=[
-                {"role":"system","content":translator_system_prompt(source_lang, target_lang)},
-                {"role":"user","content":user_prompt}
+                {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
+                {"role": "user",   "content": user_prompt},
             ],
-            max_output_tokens=200
+            max_output_tokens=200,
+            temperature=0,
         )
         out = safe_output_text(resp)
         if not out:
-            print("⚠️ translate_text returned empty; falling back to literal source.")
-        return out or (text if isinstance(text, str) else str(text))
+            print("⚠️ translate_text returned empty")
+        # Do NOT return tuples
+        if not out and mode == "context":
+            # Fall back to translating the previous sentence alone (enforced later by caller)
+            return str(previous)
+        return out or (str(text) if isinstance(text, str) else "")
     except Exception as e:
         print("❌ translate_text error:", e)
-        return text if isinstance(text, str) else str(text)
+        # Do NOT return tuples
+        if mode == "context":
+            previous, _ = text
+            return str(previous)
+        return text if isinstance(text, str) else ""
 
-async def stream_translate(websocket: WebSocket, text: str, source_lang: str, target_lang: str) -> str:
+async def translate_text_enforced(text: str, source_lang: str, target_lang: str) -> str:
     """
-    Stream translation to the UI with [PARTIAL] updates and a [FINAL] at the end.
-    Returns final translated text. On failure, falls back to non-streaming call.
+    Enforced translation of a single sentence (no context).
     """
     try:
-        buf, last = [], time.monotonic()
+        resp = await client.responses.create(
+            model="gpt-5",
+            input=[
+                {"role": "system", "content": translator_system_prompt(source_lang, target_lang) +
+                 "\nCRITICAL: Do NOT echo the source. Output must be in the target language script."},
+                {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
+            ],
+            max_output_tokens=220,
+            temperature=0,
+        )
+        return safe_output_text(resp) or ""
+    except Exception as e:
+        print("❌ translate_text_enforced error:", e)
+        return ""
+
+async def refine_previous(prev_text: str, curr_text: str,
+                          source_lang: str, target_lang: str) -> str | None:
+    """
+    Try to refine the previous sentence using current as context.
+    Returns refined string, or None if not confident (so UI won’t be updated).
+    """
+    # 1) Context attempt
+    out = await translate_text((prev_text, curr_text), source_lang, target_lang, mode="context")
+    if out and not violates_target_lang(out, target_lang):
+        return out
+
+    # 2) Enforce previous alone
+    enforced = await translate_text_enforced(prev_text, source_lang, target_lang)
+    if enforced and not violates_target_lang(enforced, target_lang):
+        return enforced
+
+    # 3) Give up (keep what's already on screen)
+    print("ℹ️ refinement skipped (empty/invalid)")
+    return None
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Streaming (robust for GPT-5)
+# ──────────────────────────────────────────────────────────────────────────────
+async def stream_translate(websocket: WebSocket, text: str,
+                           source_lang: str, target_lang: str) -> str:
+    """
+    Stream translation with GPT-5, compatible with models that sometimes emit
+    no deltas and only a final object. If we end with nothing, use non-stream
+    fallback, then enforced retry. Never returns empty.
+    """
+    final_text = ""
+    types_seen = set()
+
+    try:
+        buf = []
+        last_partial_ts = time.monotonic()
+
         async with client.responses.stream(
             model="gpt-5",
             input=[
                 {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
-                {"role": "user", "content":
-                    f"Translate from {source_lang} to {target_lang}.\n\n"
-                    f"Sentence:\n{text}\n\n"
-                    f"Return ONLY the {target_lang} translation (no extra words)."
-                },
+                {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
             ],
             max_output_tokens=200,
+            temperature=0,
         ) as stream:
 
             async for event in stream:
-                et = getattr(event, "type", "")
-                if et in ("response.output_text.delta", "response.delta", "message.delta"):
-                    delta = (
-                        getattr(event, "delta", None)
-                        or getattr(event, "text", None)
-                        or ""
-                    )
-                    if not isinstance(delta, str) or not delta:
-                        continue
+                etype = getattr(event, "type", "") or ""
+                types_seen.add(etype)
 
+                # Try to extract text from common fields
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
                     buf.append(delta)
-                    s = "".join(buf)
-                    now = time.monotonic()
-                    # Send partials on punctuation, time, or token count thresholds
-                    if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
-                        await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
-                        last = now
+                else:
+                    t = getattr(event, "text", None)
+                    if isinstance(t, str) and t:
+                        buf.append(t)
 
+                # Send partials on time/punct thresholds
+                s = "".join(buf)
+                if s:
+                    now = time.monotonic()
+                    if s.endswith(("。", "、", ".", "!", "?", "！", "？")) or (now - last_partial_ts) > 0.18 or len(s.split()) >= 8:
+                        await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
+                        last_partial_ts = now
+
+            # Finalization (GPT-5 may put full text here)
             final_resp = await stream.get_final_response()
             final_text = "".join(buf).strip()
             if not final_text:
-                final_text = safe_output_text(final_resp)
-
-        if not final_text:
-            # Fallback non-streaming
-            resp = await client.responses.create(
-                model="gpt-5",
-                input=[
-                    {"role":"system","content":translator_system_prompt(source_lang, target_lang)},
-                    {"role":"user","content":
-                        f"Translate from {source_lang} to {target_lang}.\n\n"
-                        f"Sentence:\n{text}\n\n"
-                        f"Return ONLY the {target_lang} translation (no extra words)."
-                    },
-                ],
-                max_output_tokens=200
-            )
-            final_text = safe_output_text(resp)
-
-        if not final_text:
-            print("⚠️ stream_translate produced no text; returning source.")
-            final_text = text
-
-        await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
-        return final_text
+                final_text = safe_output_text(final_resp) or ""
 
     except Exception as e:
         print("❌ stream_translate error:", e)
-        fallback = await translate_text(text, source_lang, target_lang)
-        await websocket.send_text(f"[FINAL]{json.dumps({'text': fallback or text}, ensure_ascii=False)}")
-        return fallback or text
 
-# ---------------- WebSocket ----------------
+    if not final_text:
+        # Non-streaming fallback
+        print(f"⚠️ stream empty — types_seen={sorted(types_seen)}; trying non-stream")
+        try:
+            resp = await client.responses.create(
+                model="gpt-5",
+                input=[
+                    {"role": "system", "content": translator_system_prompt(source_lang, target_lang)},
+                    {"role": "user",   "content": strict_user_prompt(text, source_lang, target_lang)},
+                ],
+                max_output_tokens=200,
+                temperature=0,
+            )
+            final_text = safe_output_text(resp) or ""
+        except Exception as e:
+            print("❌ non-streaming fallback error:", e)
+
+    # Enforce language if needed
+    if not final_text or violates_target_lang(final_text, target_lang):
+        print("⚠️ enforcing target language (current segment)…")
+        enforced = await translate_text_enforced(text, source_lang, target_lang)
+        if enforced and not violates_target_lang(enforced, target_lang):
+            final_text = enforced
+
+    if not final_text:
+        print("‼️ FINAL EMPTY after stream+fallback; echoing source to avoid blank UI")
+        final_text = text
+
+    # One last FINAL to close out the active line on the UI
+    await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
+    return final_text
+
+# ──────────────────────────────────────────────────────────────────────────────
+# WebSocket
+# ──────────────────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -233,8 +385,8 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
 
-        # ALWAYS translate every chunk immediately; then refine the previous one
         while True:
+            # Receive a chunk and transcribe
             try:
                 audio = await websocket.receive_bytes()
             except Exception:
@@ -253,10 +405,9 @@ async def websocket_endpoint(websocket: WebSocket):
                      "-y", "-i", raw_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
                 )
-
                 if p.returncode != 0:
                     err = p.stderr.decode("utf-8", errors="ignore")
-                    print("ffmpeg error:", err[:500])
+                    print("ffmpeg error:", err[:300])
                     continue
 
                 try:
@@ -294,24 +445,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
             except Exception as e:
                 print("⚠️ hallucination_check failed:", e)
+            
+            if should_skip_fragment(text, source_lang):
+                print("🚫 Skipping trivial fragment:", text)
+                continue
 
-            # New segment for THIS chunk (translate immediately)
+
+            # New segment (translate immediately)
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
 
-            # Stream translation now (immediate display)
             final_translation = await stream_translate(websocket, text, source_lang, target_lang)
             print(f"✅ [SEG {segment_id[:8]}] Final translation:", final_translation[:120])
             await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
 
-            # Refine PREVIOUS segment (if any) using CURRENT as context
+            # Refinement: improve the previous segment with context from current
             if len(transcript_history) >= 2:
                 prev_id, prev_text = transcript_history[-2]
                 curr_id, curr_text = transcript_history[-1]
                 try:
-                    improved = await translate_text((prev_text, curr_text), source_lang, target_lang, mode="context")
-                    print(f"🔄 Refinement for prev {prev_id[:8]} using curr {curr_id[:8]}:", improved[:120])
-                    await websocket.send_text(f"[UPDATE]{json.dumps({'id': prev_id, 'text': improved}, ensure_ascii=False)}")
+                    improved = await refine_previous(prev_text, curr_text, source_lang, target_lang)
+                    if improved and improved.strip() and not violates_target_lang(improved, target_lang):
+                        print(f"🔄 Refinement for prev {prev_id[:8]} using curr {curr_id[:8]}:", improved[:120])
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': prev_id, 'text': improved}, ensure_ascii=False)}")
+                    else:
+                        # Skip update rather than sending bad/tuple/english output
+                        print(f"ℹ️ No valid refinement for prev {prev_id[:8]} (keeping original).")
                 except Exception as e:
                     print("❌ refinement error:", e)
 
@@ -324,6 +483,9 @@ async def websocket_endpoint(websocket: WebSocket):
             pass
         print("🔌 WebSocket disconnected")
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Static
+# ──────────────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
