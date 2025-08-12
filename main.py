@@ -298,9 +298,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     f.write(audio)
 
                 p = subprocess.run(
-                    ["ffmpeg","-y","-i",raw_path,"-ar","16000","-ac","1","wav", "-loglevel", "error", "-hide_banner", wav_path],
+                    ["ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-y", "-i", raw_path, "-ar", "16000", "-ac", "1", "-f", "wav", wav_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
                 )
+
                 if p.returncode != 0:
                     err = p.stderr.decode("utf-8", errors="ignore")
                     print("ffmpeg error:", err[:500])
