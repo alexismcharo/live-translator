@@ -3,12 +3,13 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+from difflib import SequenceMatcher
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
 client = openai.AsyncOpenAI(api_key=api_key)
 
-# Pre-warm ffmpeg & audio stack
+# 🔧 Pre-warm ffmpeg & audio stack so the first request isn't sluggish.
 try:
     subprocess.run(
         [
@@ -22,10 +23,10 @@ try:
 except:
     pass
 
-# Optimized for T4 GPU (if available)
+# 🎧 Whisper: large-v3 is great quality. We'll tweak runtime settings below for live use.
 model = whisper.load_model("large-v3")
 
-# Warm Whisper model once to reduce first-latency (fix path)
+# Warm the model with a tiny file to avoid first-translation hiccups.
 try:
     model.transcribe("/tmp/warm.wav", language="en", fp16=True)
 except:
@@ -37,28 +38,42 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
-# Histories
+# 🧠 Light histories to help with repetition control.
 transcript_history = []  # [(segment_id, original_text)]
-recent_targets = []      # last few translated outputs only
-MAX_RECENT = 5
+recent_targets = []      # just the latest translated outputs we showed the user
+MAX_RECENT = 15          # a bit longer memory cuts down on deja-vu lines
 MAX_TRANSCRIPTS = 200
 
-# --------------------- Fuzzy repetition utilities ---------------------
+# --------------------- Fuzzy/partial repetition utilities ---------------------
 
 def _normalize_text_for_compare(s: str) -> str:
-    """Lowercase, normalize spacing/punctuation; keep alnum + a few symbols."""
+    """
+    Keep it simple: lowercase, collapse spaces, and keep common symbols/units.
+    This helps us compare apples-to-apples across tiny formatting differences.
+    """
     if not s:
         return ""
     s = s.lower()
     s = s.replace("kg.", "kg").replace(" kg", "kg")
-    s = re.sub(r"[^a-z0-9£$€¥%\-\. ]+", " ", s)  # keep common currency/units
+    # Keep alnum + currency/percent/units-ish stuff; strip the rest.
+    s = re.sub(r"[^a-z0-9£$€¥%\-\. ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def _token_set(s: str) -> set:
+def _tokenize_simple(s: str) -> list[str]:
+    # Hyphens/periods can split words in captions; treat them as spaces for overlap checks.
     s = re.sub(r"[\-\.]", " ", s)
     toks = [t for t in s.split() if t]
-    return set(toks)
+    return toks
+
+def _ngrams(tokens: list[str], n: int = 6) -> set[tuple[str, ...]]:
+    """
+    Turn a sentence into rolling n-grams. Using 5–8 tends to work best for live ASR;
+    6 is a nice middle ground.
+    """
+    if len(tokens) < n:
+        return {tuple(tokens)} if tokens else set()
+    return {tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1)}
 
 def _jaccard(a: set, b: set) -> float:
     if not a and not b:
@@ -70,62 +85,124 @@ def _jaccard(a: set, b: set) -> float:
     return inter / union if union else 0.0
 
 def _is_fuzzy_duplicate(a: str, b: str,
-                        jaccard_threshold: float = 0.82,
-                        ratio_threshold: float = 0.86,
-                        contain_threshold: float = 0.92) -> bool:
+                        jaccard_threshold: float = 0.75,
+                        ratio_threshold: float = 0.80,
+                        contain_threshold: float = 0.80,
+                        ngram_n: int = 6,
+                        ngram_threshold: float = 0.70) -> bool:
     """
-    Decide if two sentences are near-duplicates using:
-      - Jaccard overlap on token sets
-      - difflib.SequenceMatcher ratio
-      - containment (short inside long)
+    Decide if two sentences/clauses are "basically the same".
+    We check:
+      - containment: short is mostly inside long
+      - character-level similarity (SequenceMatcher)
+      - n-gram overlap (catches mid-sentence repeats)
+      - token-set Jaccard as a coarse backup
     """
     na, nb = _normalize_text_for_compare(a), _normalize_text_for_compare(b)
     if not na or not nb:
         return False
 
+    # Containment (lets us catch "included baggage... included" style tails)
     short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
     if len(short) >= 6 and short in long_:
         if len(short) / len(long_) >= contain_threshold:
             return True
 
-    ja = _token_set(na)
-    jb = _token_set(nb)
-    jacc = _jaccard(ja, jb)
-    ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+    # Character-level similarity
+    ratio = SequenceMatcher(None, na, nb).ratio()
+    if ratio >= ratio_threshold:
+        return True
 
-    return (jacc >= jaccard_threshold) or (ratio >= ratio_threshold)
+    # N-gram overlap (robust to punctuation/small edits)
+    ta, tb = _tokenize_simple(na), _tokenize_simple(nb)
+    ga, gb = _ngrams(ta, n=ngram_n), _ngrams(tb, n=ngram_n)
+    if ga and gb and _jaccard(ga, gb) >= ngram_threshold:
+        return True
+
+    # Token-set Jaccard as a gentle last check
+    ja, jb = set(ta), set(tb)
+    if _jaccard(ja, jb) >= jaccard_threshold:
+        return True
+
+    return False
 
 def collapse_repetition(text: str, *, fuzzy: bool = True) -> str:
     """
-    Remove exact or near-exact repeated sentences/clauses.
-    - fuzzy=True: use near-duplicate checks (for initial [DONE] lines).
-    - fuzzy=False: only drop exact duplicates (for [UPDATE] to avoid jumpiness).
+    Squash obvious repeats from a single piece of text.
+    - If fuzzy=True, we aggressively remove near-duplicates (better for [DONE]).
+    - If fuzzy=False, we only remove exact duplicates (safer for [UPDATE]).
+    This function also catches *mid-sentence* repetition via n-grams.
     """
     if not text:
         return text
 
-    # Split by sentence boundaries and strong separators
-    parts = re.split(r'(?<=[.!?！？。…])\s+|[\u2014\u2013\-]{1,2}\s+|…\s*', text)
+    # Split on sentence-ish boundaries but also keep clauses; live ASR is messy.
+    parts = re.split(
+        r'(?<=[.!?！？。…])\s+|[\u2014\u2013\-]{1,2}\s+|…\s*|[、，,;；]\s*',
+        text
+    )
     parts = [p.strip() for p in parts if p and p.strip()]
 
     kept = []
     seen_exact = set()
+
     for p in parts:
         if not p:
             continue
+
         if not fuzzy:
+            # Exact-only mode for minimal jumpiness in [UPDATE]
             key = p.strip().lower()
             if key in seen_exact:
                 continue
             seen_exact.add(key)
             kept.append(p)
-        else:
-            is_dup = any(_is_fuzzy_duplicate(p, prev) for prev in kept)
-            if not is_dup:
-                kept.append(p)
+            continue
 
-    cleaned = " ".join(kept)
-    return cleaned.strip()
+        # Fuzzy mode: drop if "basically the same" as anything we've kept so far
+        is_dup = any(_is_fuzzy_duplicate(p, prev) for prev in kept)
+        if not is_dup:
+            kept.append(p)
+
+    cleaned = " ".join(kept).strip()
+    return cleaned
+
+def is_partial_duplicate_against_history(new_text: str, history: list[str],
+                                         ratio_threshold: float = 0.80,
+                                         contain_threshold: float = 0.80,
+                                         ngram_n: int = 6,
+                                         ngram_threshold: float = 0.70) -> bool:
+    """
+    Final gate before we send a line to the user:
+    if this new line is mostly the same as any of the recent lines we've already shown,
+    we just don't send it.
+    """
+    norm_new = _normalize_text_for_compare(new_text)
+    if not norm_new:
+        return False
+
+    for old in reversed(history):
+        norm_old = _normalize_text_for_compare(old)
+        if not norm_old:
+            continue
+
+        # Quick containment
+        short, long_ = (norm_new, norm_old) if len(norm_new) <= len(norm_old) else (norm_old, norm_new)
+        if len(short) >= 6 and short in long_:
+            if len(short) / len(long_) >= contain_threshold:
+                return True
+
+        # Char-level similarity
+        if SequenceMatcher(None, norm_new, norm_old).ratio() >= ratio_threshold:
+            return True
+
+        # N-gram overlap
+        ta, tb = _tokenize_simple(norm_new), _tokenize_simple(norm_old)
+        ga, gb = _ngrams(ta, n=ngram_n), _ngrams(tb, n=ngram_n)
+        if ga and gb and _jaccard(ga, gb) >= ngram_threshold:
+            return True
+
+    return False
 
 # ----------------------------------------------------------------------
 
@@ -133,11 +210,11 @@ def collapse_repetition(text: str, *, fuzzy: bool = True) -> str:
 async def serve_index():
     return FileResponse(os.path.join("frontend", "index.html"))
 
-# --- Live-aware hallucination filter (keeps normal chatter; blocks broadcast CTAs) ---
+# 🛑 Lightweight hallucination/CTA filter.
 async def hallucination_check(text: str) -> bool:
     """
-    Returns True if the segment should be dropped as broadcast-style filler
-    (subscribe/like/sign-off/viewer address), False otherwise.
+    Returns True if the segment looks like channel fluff (subscribe/like/sign-off),
+    which we don't want in live captions. Normal conversational stuff passes through.
     """
     try:
         seg = (text or "").strip()
@@ -154,24 +231,7 @@ Decide if the segment is *broadcast-style filler* (audience address, subscribe/l
 
 Guidelines:
 - Return YES only if the segment is clearly a CTA/sign-off or meta-address to viewers.
-- Return NO for normal conversational content, even if brief (e.g., 'thanks', 'sorry', 'okay') or disfluent (um/uh/えっと).
-- If the segment looks incomplete or mid-utterance, default to NO unless it already contains a clear CTA cue.
-
-Positive examples (YES):
-- Thanks for watching!
-- Don't forget to subscribe.
-- Click the bell icon.
-- See you in the next video.
-- Link in the description.
-- 皆さんこんにちは (as a YouTuber-style opener addressing viewers)
-- チャンネル登録お願いします / 高評価お願いします / ベルマーク通知をオンに
-
-Negative examples (NO):
-- Thank you. (as a normal conversational turn)
-- Sorry about that.
-- Okay, next step.
-- ありがとうございます。 / すみません。 / はい、次に進みます。
-- (partial) "Click the..." — unless it’s clearly a CTA (insufficient on its own → NO)
+- Return NO for normal conversational content, even if brief or disfluent.
 
 Segment:
 <segment>{seg}</segment>
@@ -194,14 +254,13 @@ Answer with exactly YES or NO.
         print("❌ Hallucination check error:", e)
         return False
 
-# --- Main translation function (natural, live-caption style) ---
+# 🎙️ Main translation function: natural, live-caption style output.
 async def translate_text(text, source_lang, target_lang, mode="default"):
     """
-    Natural, idiomatic live captions; mirrors fragment completeness; minimal edits on refinements.
+    Keep translations idiomatic and avoid guessing endings.
+    We also pass in some recent outputs so the model doesn't rehash them.
     """
     target_register = "polite" if target_lang == "Japanese" else "neutral"
-
-    # recent targets for repetition control
     recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
 
     if mode == "context":
@@ -221,11 +280,11 @@ Produce a natural, idiomatic {target_lang} caption for <previous>, updating it o
 
 <rules>
 - Output: ONLY the improved translation of <previous>. No quotes, no commentary.
-- Make phrasing natural in {target_lang} (not literal), but add no new information.
+- Make phrasing natural in {target_lang}; add no new information.
 - If <previous> was a fragment, keep it a natural fragment; don't invent endings.
-- Resolve pronouns, names, tense, or ellipsis only if <current> makes them clear.
-- Remove filler like uh/um/えっと/あの unless meaningful.
-- Keep numbers as digits and preserve proper nouns/terminology.
+- Resolve details only if <current> makes them clear.
+- Remove pure filler (uh/um/えっと/あの).
+- Keep numbers as digits; preserve names/units.
 - Avoid repeating sentences or phrases already present in <recent_target> unless they add new factual content.
 - Keep edits minimal to avoid visual jumpiness.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
@@ -249,13 +308,12 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
 </recent_target>
 
 <rules>
-- Natural over literal: use target-language word order and phrasing; keep meaning faithful.
-- Mirror completeness: if the source is a fragment, keep a natural fragment; do not guess the rest.
-- Remove pure filled pauses (uh/um/えっと/あの) unless they carry meaning.
+- Natural over literal; keep meaning faithful.
+- Mirror completeness: if the source is a fragment, keep a natural fragment.
+- Remove pure filled pauses unless meaningful.
 - Keep numbers as digits; preserve names, technical terms, and units.
-- Do not add greetings/sign-offs/explanations or CTAs unless in source.
-- Avoid repeating sentences or phrases already present in <recent_target> unless they add new factual content.
-- If repetition occurs, merge into one concise, natural sentence.
+- No extra greetings/sign-offs/CTAs.
+- Avoid repeating phrases already in <recent_target>; merge repeats into one clean line.
 - If input is already in {target_lang}, return it unchanged.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
@@ -274,7 +332,7 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
             verbosity="low"
         )
         raw = (response.choices[0].message.content or "").strip()
-        # Default path: fuzzy de-dupe; context path: exact-only de-dupe
+        # For final lines we de-dupe fuzzily; for updates we stick to exact-only to avoid flicker.
         if mode == "context":
             return collapse_repetition(raw, fuzzy=False)
         else:
@@ -283,7 +341,7 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
         print("❌ Translation error:", e)
         return text
 
-# --- WebSocket for streaming translation ---
+# 🧵 WebSocket for streaming translation
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -310,6 +368,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if not audio:
                 continue
 
+            # Save raw audio chunk and convert to 16kHz mono WAV with mild silence trimming.
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as raw:
                 raw.write(audio)
                 raw.flush()
@@ -332,13 +391,15 @@ async def websocket_endpoint(websocket: WebSocket):
                     except:
                         continue
 
+                    # 🎯 Whisper tuned for live streaming:
+                    # - condition_on_previous_text=False reduces "echoed" repeats.
+                    # - slightly higher hallucination_silence_threshold trims rambly tails.
                     result = model.transcribe(
                         wav.name,
                         fp16=True,
-                        temperature=0.0,
-                        # beam_size omitted (greedy implied with temperature=0.0)
-                        condition_on_previous_text=True,
-                        hallucination_silence_threshold=0.2,
+                        temperature=0.0,  # greedy is fine for live; keeps latency down
+                        condition_on_previous_text=False,
+                        hallucination_silence_threshold=0.3,
                         no_speech_threshold=0.3,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.4,
@@ -350,7 +411,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # ---------- Keep thank-you filter ----------
+                    # 🙏 We quietly ignore common "thanks" so they don't spam the captions.
                     text_lower = text.lower()
                     if (
                         "thank you" in text_lower
@@ -361,9 +422,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     ):
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
-                    # ------------------------------------------
 
-                    # GPT-based hallucination filter
+                    # 🧹 CTA/broadcast style filler filter (best-effort; fails open).
                     try:
                         if await hallucination_check(text):
                             print("🧠 GPT flagged as broadcast/CTA filler:", text)
@@ -371,25 +431,28 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as e:
                         print("⚠️ Hallucination check failed open (passing segment):", e)
 
-                    # assign ID and translate
+                    # Assign an ID and translate.
                     segment_id = str(uuid.uuid4())
                     transcript_history.append((segment_id, text))
                     if len(transcript_history) > MAX_TRANSCRIPTS:
                         transcript_history.pop(0)
 
                     translated = await translate_text(text, source_lang, target_lang)
-                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
 
-                    # store in recent target history (only [DONE] outputs to avoid feedback loops)
-                    recent_targets.append(translated)
-                    if len(recent_targets) > MAX_RECENT:
-                        recent_targets.pop(0)
+                    # 🚧 Final gate: if this looks like something we *just* showed the user, drop it.
+                    if is_partial_duplicate_against_history(translated, recent_targets):
+                        print("🔁 Dropped near-duplicate translation:", translated)
+                    else:
+                        await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
+                        recent_targets.append(translated)
+                        if len(recent_targets) > MAX_RECENT:
+                            recent_targets.pop(0)
 
-                    # update previous translation using new context
+                    # 🔄 Try a gentle refinement of the *previous* line with the new context.
                     if len(transcript_history) >= 2:
                         prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                         improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
-                        # no extra de-dupe here; translate_text(context) already did exact-only
+                        # In update mode we already do exact-only dedupe to keep the text stable.
                         await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
 
     except Exception as e:
@@ -397,4 +460,5 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close()
 
 if __name__ == "__main__":
+    # Keep it simple: bind to all interfaces; tweak the port as you like.
     uvicorn.run(app, host="0.0.0.0", port=8000)
