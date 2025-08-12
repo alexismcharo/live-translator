@@ -34,24 +34,22 @@
   <!-- Output -->
   <div class="w-full max-w-4xl flex flex-col space-y-6 items-center">
     <div class="w-full">
-      <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-8 tracking-wide min-h-[160px] w-full"></div>
+      <div id="output" class="bg-[#1A1A1C] rounded-lg px-6 py-10 shadow-md text-2xl font-semibold leading-8 tracking-wide min-h-[160px] w-full">
+        <div id="committed"></div>
+      </div>
     </div>
   </div>
 
   <script>
     const startBtn = document.getElementById("startBtn");
     const stopBtn = document.getElementById("stopBtn");
-    const output = document.getElementById("output");
     const directionSelect = document.getElementById("direction");
+    const committed = document.getElementById("committed");
 
     let mediaStream = null;
     let socket = null;
     let recording = false;
-
-    // Single rolling paragraph + ordered segments
-    const segmentOrder = [];          // [id1, id2, ...]
-    const segmentText = new Map();    // id -> text
-    let rollingPara = null;
+    let activeDiv = null;
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -69,56 +67,39 @@
       stopBtn.classList.toggle("cursor-not-allowed", !running);
     }
 
-    function ensureRollingPara() {
-      if (!rollingPara) {
-        rollingPara = document.createElement("div");
-        rollingPara.className = "paragraph current text-white";
-        rollingPara.style.whiteSpace = "normal";
-        rollingPara.style.lineHeight = "1.6";
-        rollingPara.style.wordBreak = "break-word";
-        output.appendChild(rollingPara);
+    function ensureActiveDiv() {
+      if (!activeDiv) {
+        activeDiv = document.createElement("div");
+        activeDiv.className = "text-white caret mb-3";
+        activeDiv.style.whiteSpace = "pre-wrap";
+        activeDiv.style.lineHeight = "1.6";
+        activeDiv.style.wordBreak = "break-word";
+        committed.appendChild(activeDiv);
       }
-      return rollingPara;
-    }
-
-    function rebuildParagraph() {
-      const p = ensureRollingPara();
-      const pieces = segmentOrder.map(id => segmentText.get(id)).filter(Boolean);
-      p.textContent = pieces.join(" ");
-      // trim to a rolling window
-      const maxChars = 800;
-      if (p.textContent.length > maxChars) {
-        while (p.textContent.length > maxChars && segmentOrder.length > 1) {
-          const removed = segmentOrder.shift();
-          segmentText.delete(removed);
-        }
-        p.textContent = segmentOrder.map(id => segmentText.get(id)).filter(Boolean).join(" ");
-      }
+      return activeDiv;
     }
 
     function setActivePartial(text) {
-      let ghost = document.getElementById("ghost-partial");
-      if (!ghost) {
-        ghost = document.createElement("span");
-        ghost.id = "ghost-partial";
-        ghost.className = "text-gray-300 italic caret";
-        ensureRollingPara().appendChild(document.createTextNode(" "));
-        ensureRollingPara().appendChild(ghost);
-      }
-      ghost.textContent = text;
+      const el = ensureActiveDiv();
+      el.textContent = text || "";
     }
+
     function clearActivePartial() {
-      const ghost = document.getElementById("ghost-partial");
-      if (ghost?.parentNode) ghost.parentNode.removeChild(ghost);
+      if (activeDiv) activeDiv.classList.remove("caret");
     }
-    function setAsrPartial(text) { setActivePartial(text); }
-    function clearAsrPartial() { /* cleared with active partial */ }
+
+    function commitFinal(text) {
+      if (!activeDiv) ensureActiveDiv();
+      activeDiv.classList.remove("caret");
+      activeDiv.textContent = (text || "").trim();
+      activeDiv = null;
+    }
 
     function handleMessage(data) {
       try {
         if (data.startsWith("[PARTIAL_ASR]")) {
           const { text } = JSON.parse(data.replace("[PARTIAL_ASR]", ""));
-          setAsrPartial(text || "");
+          setActivePartial(text || "");
           return;
         }
         if (data.startsWith("[PARTIAL]")) {
@@ -134,25 +115,14 @@
         if (data.startsWith("[DONE]")) {
           const { id, text } = JSON.parse(data.replace("[DONE]", ""));
           clearActivePartial();
-          if (id && text) {
-            if (!segmentText.has(id)) segmentOrder.push(id);
-            segmentText.set(id, text);
-            rebuildParagraph();
-          } else if (text) {
-            const tempId = `temp-${Date.now()}`;
-            segmentOrder.push(tempId);
-            segmentText.set(tempId, text);
-            rebuildParagraph();
-          }
+          commitFinal(text || "");
           return;
         }
         if (data.startsWith("[UPDATE]")) {
-          const { id, text } = JSON.parse(data.replace("[UPDATE]", ""));
-          if (id) {
-            if (!segmentText.has(id)) segmentOrder.push(id);
-            segmentText.set(id, text || "");
-            rebuildParagraph();
-          }
+          const { text } = JSON.parse(data.replace("[UPDATE]", ""));
+          // Update the last committed line if present
+          const last = committed.lastElementChild;
+          if (last) last.textContent = (text || "").trim();
           return;
         }
         if (data.startsWith("[STREAM]")) {
@@ -187,10 +157,10 @@
           socket.send(JSON.stringify({ direction: directionSelect.value }));
           recording = true;
           setButtons(true);
-          recordLoop(mimeType);   // 3.2s chunk loop
+          recordLoop(mimeType);
         };
         socket.onmessage = (e) => handleMessage(e.data);
-        socket.onclose = () => { clearActivePartial(); clearAsrPartial(); setButtons(false); };
+        socket.onclose = () => { setButtons(false); activeDiv = null; };
         socket.onerror = (e) => console.error("WebSocket error:", e);
 
       } catch (err) {
@@ -214,12 +184,12 @@
           }
         };
 
-        recorder.start();   // manual duration
+        recorder.start();
         await new Promise((resolve) => {
           setTimeout(() => {
             try { recorder.stop(); } catch {}
             resolve();
-          }, 3200);         // 3.2s chunks
+          }, 3200); // 3.2s chunks
         });
       }
     }
@@ -228,7 +198,8 @@
       recording = false;
       try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
-      clearActivePartial(); clearAsrPartial(); setButtons(false);
+      activeDiv = null;
+      setButtons(false);
     }
 
     startBtn.onclick = startRecording;

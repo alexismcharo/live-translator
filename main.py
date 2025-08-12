@@ -24,36 +24,26 @@ def safe_output_text(resp) -> str:
     """
     Robustly extract text from a Responses API object.
     Falls back to walking resp.output[...] if output_text is missing.
-    Handles several possible SDK shapes.
     """
-    # 1) Newer helper property
     txt = getattr(resp, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt.strip()
 
-    # 2) Structured output fallback
     out = []
     output = getattr(resp, "output", []) or []
     for item in output:
-        # Some SDKs put direct 'text' on the item
         it_text = getattr(item, "text", None)
         if isinstance(it_text, str) and it_text:
             out.append(it_text)
-
-        # Common: item.content is a list of chunks with .text or .input_text
         content = getattr(item, "content", []) or []
         for c in content:
-            t = (
-                getattr(c, "text", None)
-                or getattr(c, "input_text", None)
-            )
+            t = getattr(c, "text", None) or getattr(c, "input_text", None)
             if isinstance(t, str) and t:
                 out.append(t)
 
     if out:
         return "".join(out).strip()
 
-    # 3) Ultra-conservative: try common fields directly on resp
     for attr in ("message", "content", "text"):
         val = getattr(resp, attr, None)
         if isinstance(val, str) and val.strip():
@@ -88,16 +78,15 @@ app.add_middleware(
 transcript_history = deque(maxlen=500)  # [(segment_id, original_text)]
 
 # ---------------- Debounce / Flush ----------------
-LAST_AUDIO_TS = time.monotonic()   # updated when a blob arrives
-DEBOUNCE_SEC = 0.30                # min trailing quiet before "ready"
-INACTIVITY_FLUSH_SEC = 0.60        # finalize if quiet for this long
+LAST_AUDIO_TS = time.monotonic()
+DEBOUNCE_SEC = 0.30
+INACTIVITY_FLUSH_SEC = 0.60
 
 _pending_text = ""
 _pending_lock = asyncio.Lock()
 _pending_task = None
 
 def segment_ready(text: str, now_ts: float, last_ts: float) -> bool:
-    """True if we've had enough trailing quiet and content is long enough."""
     quiet = now_ts - last_ts
     short_and_quiet = (len(text) >= 3) and (quiet >= 0.50)
     long_enough = (
@@ -113,7 +102,6 @@ def set_pending_text(t: str):
     _pending_text = (t or "").strip()
 
 async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, target_lang: str):
-    """Start/restart a timer that finalizes pending ASR if the mic is quiet."""
     global _pending_task
     if _pending_task and not _pending_task.done():
         _pending_task.cancel()
@@ -129,13 +117,11 @@ async def _schedule_inactivity_flush(websocket: WebSocket, source_lang: str, tar
                 if not text:
                     return
                 set_pending_text("")
-            # finalize → translate
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
             final_translation = await stream_translate(websocket, text, source_lang, target_lang)
             print("✅ Final translation:", final_translation[:120])
             await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': final_translation}, ensure_ascii=False)}")
-            # context refine previous
             if len(transcript_history) >= 2:
                 prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                 improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
@@ -171,7 +157,8 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
     system_prompt = (
         f"You are a professional {source_lang}↔{target_lang} translator.\n"
         f"- Output ONLY in {target_lang}. No quotes, no commentary.\n"
-        f"- If translating INTO Japanese, write in kanji/kana (no romaji, no English)."
+        f"- Translate even if the source is a fragment or incomplete.\n"
+        f"- Never return an empty string; if uncertain, translate literally."
     )
     if mode == "context":
         previous, current = text
@@ -185,7 +172,7 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
         user_prompt = (
             f"Translate from {source_lang} to {target_lang}.\n\n"
             f"Sentence:\n{text}\n\n"
-            f"Return ONLY the {target_lang} translation."
+            f"Return ONLY the {target_lang} translation (no extra words)."
         )
 
     try:
@@ -198,28 +185,28 @@ async def translate_text(text, source_lang: str, target_lang: str, mode: str = "
             max_output_tokens=200
         )
         out = safe_output_text(resp)
-        return out
+        return out or text
     except Exception as e:
         print("❌ translate_text error:", e)
-        return ""
+        return text
 
-# ---------------- Streaming translate (Responses API) ----------------
+# ---------------- Streaming translate ----------------
 async def stream_translate(websocket: WebSocket, text: str, source_lang: str, target_lang: str) -> str:
     system_prompt = (
         f"You are a professional {source_lang}↔{target_lang} translator.\n"
         f"- Output ONLY in {target_lang}. No quotes, no commentary.\n"
-        f"- If translating INTO Japanese, write in kanji/kana (no romaji, no English)."
+        f"- Translate even if the source is a fragment or incomplete.\n"
+        f"- Never return an empty string; if uncertain, translate literally."
     )
     user_prompt = (
         f"Translate from {source_lang} to {target_lang}.\n\n"
         f"Sentence:\n{text}\n\n"
-        f"Return ONLY the {target_lang} translation."
+        f"Return ONLY the {target_lang} translation (no extra words)."
     )
 
     try:
         buf, last = [], time.monotonic()
 
-        # Correct streaming pattern: async context manager + iterate events
         async with client.responses.stream(
             model="gpt-5",
             input=[
@@ -231,8 +218,6 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
 
             async for event in stream:
                 et = getattr(event, "type", "")
-
-                # Accept multiple delta event shapes from different SDKs
                 if et in ("response.output_text.delta", "response.delta", "message.delta"):
                     delta = (
                         getattr(event, "delta", None)
@@ -249,14 +234,11 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
                         await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
                         last = now
 
-                # (Optional) handle tool/use events here if you add tools later.
-
             final_resp = await stream.get_final_response()
             final_text = "".join(buf).strip()
             if not final_text:
                 final_text = safe_output_text(final_resp)
 
-        # Last-ditch non-streaming fallback if still empty
         if not final_text:
             resp = await client.responses.create(
                 model="gpt-5",
@@ -268,14 +250,17 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
             )
             final_text = safe_output_text(resp)
 
+        if not final_text:
+            final_text = text
+
         await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
         return final_text
 
     except Exception as e:
         print("❌ stream_translate error:", e)
-        strict = await translate_text(text, source_lang, target_lang)
-        await websocket.send_text(f"[FINAL]{json.dumps({'text': strict}, ensure_ascii=False)}")
-        return strict
+        fallback = await translate_text(text, source_lang, target_lang)
+        await websocket.send_text(f"[FINAL]{json.dumps({'text': fallback or text}, ensure_ascii=False)}")
+        return fallback or text
 
 # ---------------- WebSocket ----------------
 @app.websocket("/ws")
@@ -286,7 +271,6 @@ async def websocket_endpoint(websocket: WebSocket):
     global LAST_AUDIO_TS
 
     try:
-        # config
         settings = await websocket.receive_text()
         cfg = json.loads(settings)
         direction = cfg.get("direction")
@@ -298,7 +282,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.close()
             return
 
-        # audio loop
         while True:
             try:
                 audio = await websocket.receive_bytes()
@@ -314,9 +297,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 with open(raw_path, "wb") as f:
                     f.write(audio)
 
-                # Transcode WITHOUT silenceremove; surface errors
                 p = subprocess.run(
-                    ["ffmpeg","-y","-i",raw_path,"-ar","16000","-ac","1",wav_path],
+                    ["ffmpeg","-y","-i",raw_path,"-ar","16000","-ac","1","wav", "-loglevel", "error", "-hide_banner", wav_path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
                 )
                 if p.returncode != 0:
@@ -345,18 +327,15 @@ async def websocket_endpoint(websocket: WebSocket):
             if not text:
                 continue
 
-            # quick thank-you filter
             tl = text.lower()
             if ("thank you" in tl or "thanks" in tl or "ありがとう" in text or "ありがとうございます" in text or "ありがと" in text):
                 print("🚫 Skipping thank-you/ありがとう phrase:", text)
                 continue
 
-            # hallucination filter
             if await hallucination_check(text):
                 print("🧠 GPT flagged as hallucination:", text)
                 continue
 
-            # debounce + min-length gate
             now_ts = time.monotonic()
             if not segment_ready(text, now_ts, LAST_AUDIO_TS):
                 await websocket.send_text(f"[PARTIAL_ASR]{json.dumps({'text': text}, ensure_ascii=False)}")
@@ -368,7 +347,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 async with _pending_lock:
                     set_pending_text("")
 
-            # finalize immediately
             segment_id = str(uuid.uuid4())
             transcript_history.append((segment_id, text))
             final_translation = await stream_translate(websocket, text, source_lang, target_lang)
