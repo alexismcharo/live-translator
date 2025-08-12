@@ -56,9 +56,12 @@
     let mediaStream = null;
     let socket = null;
     let recorder = null;
-    let recording = false;
 
-    const MAX_CHARS = 400; // cap the paragraph length for live readability
+    // UI cap so the text box stays readable
+    const MAX_CHARS = 400;
+
+    // ~800 ms chunks for live STT translation
+    const TIMESLICE_MS = 800;
 
     function wsUrl() {
       const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -94,7 +97,6 @@
     }
 
     function trimToMaxChars() {
-      // Remove oldest segments until under MAX_CHARS
       while (totalChars() > MAX_CHARS && committed.firstElementChild) {
         committed.removeChild(committed.firstElementChild);
       }
@@ -107,7 +109,6 @@
       span.textContent = (text || "").trim();
       committed.appendChild(span);
       trimToMaxChars();
-      // Auto-scroll to bottom
       window.requestAnimationFrame(() => {
         window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
       });
@@ -133,7 +134,6 @@
           }
           return;
         }
-        // Ignore any other message types
       } catch (e) {
         console.warn("Message parse error:", e);
       }
@@ -158,75 +158,41 @@
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         socket = new WebSocket(wsUrl());
-        socket.binaryType = "arraybuffer"; // small perf win
         socket.onopen = () => {
           socket.send(JSON.stringify({ direction: directionSelect.value }));
-          recording = true;
           setButtons(true);
           setStatus("Recording…");
 
-          recorder = new MediaRecorder(mediaStream, { mimeType });
-
-          // Optional: simple client-side gate to coalesce tiny blobs until short silence
-          const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          const srcNode = audioCtx.createMediaStreamSource(mediaStream);
-          const analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 2048;
-          srcNode.connect(analyser);
-          const pcm = new Float32Array(analyser.fftSize);
-          function isSpeaking(threshold = 0.012) {
-            analyser.getFloatTimeDomainData(pcm);
-            let sum = 0.0;
-            for (let i = 0; i < pcm.length; i++) sum += pcm[i] * pcm[i];
-            const rms = Math.sqrt(sum / pcm.length);
-            return rms > threshold;
-          }
-
-          let holdQueue = [];
-          let silenceMs = 0;
-          let lastTick = performance.now();
-          function tickGateAndFlush(blob) {
-            const now = performance.now();
-            const dt = now - lastTick;
-            lastTick = now;
-            if (isSpeaking()) {
-              silenceMs = 0;
-              holdQueue.push(blob);
-              // backpressure: send if queue grows too large
-              const totalBytes = holdQueue.reduce((a,b)=>a+b.size,0);
-              if (totalBytes > 300000) flushNow();
-            } else {
-              silenceMs += dt;
-              holdQueue.push(blob);
-              if (silenceMs >= 500) flushNow(); // ~0.5s silence => send
-            }
-          }
-          function flushNow() {
-            if (!holdQueue.length) return;
-            const big = new Blob(holdQueue, { type: holdQueue[0].type });
-            holdQueue = [];
-            silenceMs = 0;
-            big.arrayBuffer().then(buf => {
-              if (socket?.readyState === WebSocket.OPEN) socket.send(buf);
-            });
-          }
+          recorder = new MediaRecorder(mediaStream, {
+            mimeType,
+            // Tweak as needed; lower = smaller payloads
+            audioBitsPerSecond: 32000
+          });
 
           recorder.ondataavailable = async (e) => {
-            if (!recording) return;
-            if (e.data && e.data.size > 0 && socket?.readyState === WebSocket.OPEN) {
-              // Gate and coalesce; remove this call if you prefer raw 1s chunks
-              tickGateAndFlush(e.data);
+            if (!e.data || !e.data.size) return;
+            if (socket?.readyState !== WebSocket.OPEN) return;
+
+            // Simple backpressure guard: if buffers pile up, skip this chunk
+            if (socket.bufferedAmount > 1_000_000) return; // ~1 MB
+
+            try {
+              const buf = await e.data.arrayBuffer();
+              socket.send(buf);
+            } catch (err) {
+              console.warn("send buffer error:", err);
             }
           };
-          // Continuous recorder; steady cadence
-          recorder.start(1000);
+
+          // Continuous recording with ~800ms chunks
+          recorder.start(TIMESLICE_MS);
         };
+
         socket.onmessage = (e) => handleMessage(e.data);
         socket.onclose = () => {
           setButtons(false);
           setActivePartial("");
           setStatus("Disconnected");
-          recording = false; // ensure loop stops if socket drops
         };
         socket.onerror = (e) => console.error("WebSocket error:", e);
 
@@ -237,10 +203,13 @@
     }
 
     function stopRecording() {
-      recording = false;
-      try { recorder && recorder.state !== "inactive" && recorder.stop(); } catch {}
+      try { recorder?.requestData(); } catch {}
+      try { recorder?.stop(); } catch {}
       try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
       try { socket && socket.readyState === WebSocket.OPEN && socket.close(); } catch {}
+
+      recorder = null;
+      mediaStream = null;
       setActivePartial("");
       setButtons(false);
       setStatus("");
