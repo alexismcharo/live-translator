@@ -33,8 +33,9 @@ except:
 
 app = FastAPI()
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware(
+        allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+    )
 )
 
 # Tunables
@@ -142,25 +143,32 @@ def dedupe_source_fragments(s: str) -> str:
         if key:
             prev = key
     s = "".join(out)
-    # remove trivially duplicated bigrams: "... baggage included baggage included"
+    # remove trivially duplicated bigrams
     s = re.sub(r'\b(\S+\s+\S+)\s+\1\b', r'\1', s, flags=re.IGNORECASE)
     return s
 
 # --------------------- Emission controller ---------------------
 
 def classify_relation(prev: str, curr: str):
-    """Return 'drop' | 'update' | 'new' based on similarity/containment."""
+    """
+    Return 'drop' | 'update' | 'new' based on similarity/containment.
+    Patched so the very first caption is always NEW and containment
+    requires a non-trivial previous string.
+    """
     pa, ca = _normalize_text_for_compare(prev), _normalize_text_for_compare(curr)
     if not ca:
         return "drop"
+    if not pa:  # FIRST CAPTION → must be NEW
+        return "new"
+
     r = difflib.SequenceMatcher(None, pa, ca).ratio()
     if r >= 0.96:
-        return "drop"  # near-identical to last
-    # clear extension
-    if pa and ca.startswith(pa) and len(ca) > len(pa) + 3:
+        return "drop"
+    # clear extension: previous must be at least 5 chars
+    if len(pa) >= 5 and ca.startswith(pa) and len(ca) > len(pa) + 3:
         return "update"
-    # substantial overlap → treat as update if largely a superset
-    if r >= 0.85 and len(ca) >= len(pa) and pa in ca:
+    # containment / superset with non-trivial prev
+    if len(pa) >= 5 and r >= 0.85 and pa in ca:
         return "update"
     return "new"
 
@@ -450,12 +458,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     mode="default"
                 )
 
-                # Allow empty output when nothing new
-                # (Note: refined_prev may still be non-empty even if translated_now is empty)
-                # First, decide if we should UPDATE the last line with the refined text.
+                # If context refinement produced a meaningful improvement over the last emission, UPDATE it.
                 if last_emitted_id is not None and refined_prev:
                     if meaningfully_different(last_emitted_text, refined_prev):
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': refined_prev})}")
+                        await websocket.send_text(
+                            f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': refined_prev})}"
+                        )
                         # keep histories in sync
                         if recent_targets:
                             recent_targets[-1] = refined_prev
@@ -464,24 +472,33 @@ async def websocket_endpoint(websocket: WebSocket):
                         last_emitted_text = refined_prev
                         # Note: do NOT change last_source_text here
 
-                # Next, decide how to handle the current translation relative to what we just showed.
+                # Decide how to handle the current translation relative to what we just showed.
                 if translated_now:
                     action = classify_relation(last_emitted_text, translated_now)
-                    if action == "update" and last_emitted_id is not None:
-                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated_now})}")
+                    # SAFETY: update with no id → treat as new
+                    if action == "update" and last_emitted_id is None:
+                        action = "new"
+
+                    if action == "update":
+                        await websocket.send_text(
+                            f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated_now})}"
+                        )
                         if recent_targets:
                             recent_targets[-1] = translated_now
                         else:
                             recent_targets.append(translated_now)
                         last_emitted_text = translated_now
-                        # last_source_text stays as is (the source that produced last_emitted_text)
+                        # last_source_text stays as is
+
                     elif action == "new":
                         segment_id = str(uuid.uuid4())
                         transcript_history.append((segment_id, text))
                         if len(transcript_history) > MAX_TRANSCRIPTS:
                             transcript_history.pop(0)
 
-                        await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated_now})}")
+                        await websocket.send_text(
+                            f"[DONE]{json.dumps({'id': segment_id, 'text': translated_now})}"
+                        )
                         last_emitted_id = segment_id
                         last_emitted_text = translated_now
                         last_source_text = text  # bind source that produced last emission
