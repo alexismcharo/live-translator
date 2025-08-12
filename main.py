@@ -204,10 +204,8 @@ optionally using <current> for disambiguation. Improve fluency, word choice, and
 
 <priorities>
 1) Faithful meaning > natural flow > brevity.
-2) If <previous> is a fragment, keep it a natural fragment (do not complete it).
-3) Prefer common collocations and paraphrases over literal word order.
-4) Remove filler/disfluencies (uh/um/えっと) unless semantically meaningful.
-5) Avoid repeating lines already present in <recent_target>.
+2) Prefer common collocations and paraphrases over literal word order.
+3) Avoid repeating lines already present in <recent_target>.
 </priorities>
 
 <language_tips>
