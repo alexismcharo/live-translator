@@ -1,4 +1,4 @@
-import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid
+import tempfile, subprocess, uvicorn, openai, whisper, os, json, uuid, re, difflib
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -37,7 +37,97 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
+# Histories
 transcript_history = []  # [(segment_id, original_text)]
+recent_targets = []      # last few translated outputs only
+MAX_RECENT = 5
+MAX_TRANSCRIPTS = 200
+
+# --------------------- Fuzzy repetition utilities ---------------------
+
+def _normalize_text_for_compare(s: str) -> str:
+    """Lowercase, normalize spacing/punctuation; keep alnum + a few symbols."""
+    if not s:
+        return ""
+    s = s.lower()
+    s = s.replace("kg.", "kg").replace(" kg", "kg")
+    s = re.sub(r"[^a-z0-9£$€¥%\-\. ]+", " ", s)  # keep common currency/units
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def _token_set(s: str) -> set:
+    s = re.sub(r"[\-\.]", " ", s)
+    toks = [t for t in s.split() if t]
+    return set(toks)
+
+def _jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+def _is_fuzzy_duplicate(a: str, b: str,
+                        jaccard_threshold: float = 0.82,
+                        ratio_threshold: float = 0.86,
+                        contain_threshold: float = 0.92) -> bool:
+    """
+    Decide if two sentences are near-duplicates using:
+      - Jaccard overlap on token sets
+      - difflib.SequenceMatcher ratio
+      - containment (short inside long)
+    """
+    na, nb = _normalize_text_for_compare(a), _normalize_text_for_compare(b)
+    if not na or not nb:
+        return False
+
+    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
+    if len(short) >= 6 and short in long_:
+        if len(short) / len(long_) >= contain_threshold:
+            return True
+
+    ja = _token_set(na)
+    jb = _token_set(nb)
+    jacc = _jaccard(ja, jb)
+    ratio = difflib.SequenceMatcher(None, na, nb).ratio()
+
+    return (jacc >= jaccard_threshold) or (ratio >= ratio_threshold)
+
+def collapse_repetition(text: str, *, fuzzy: bool = True) -> str:
+    """
+    Remove exact or near-exact repeated sentences/clauses.
+    - fuzzy=True: use near-duplicate checks (for initial [DONE] lines).
+    - fuzzy=False: only drop exact duplicates (for [UPDATE] to avoid jumpiness).
+    """
+    if not text:
+        return text
+
+    # Split by sentence boundaries and strong separators
+    parts = re.split(r'(?<=[.!?！？。…])\s+|[\u2014\u2013\-]{1,2}\s+|…\s*', text)
+    parts = [p.strip() for p in parts if p and p.strip()]
+
+    kept = []
+    seen_exact = set()
+    for p in parts:
+        if not p:
+            continue
+        if not fuzzy:
+            key = p.strip().lower()
+            if key in seen_exact:
+                continue
+            seen_exact.add(key)
+            kept.append(p)
+        else:
+            is_dup = any(_is_fuzzy_duplicate(p, prev) for prev in kept)
+            if not is_dup:
+                kept.append(p)
+
+    cleaned = " ".join(kept)
+    return cleaned.strip()
+
+# ----------------------------------------------------------------------
 
 @app.get("/")
 async def serve_index():
@@ -111,6 +201,9 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
     """
     target_register = "polite" if target_lang == "Japanese" else "neutral"
 
+    # recent targets for repetition control
+    recent_target_str = "\n".join(recent_targets[-MAX_RECENT:])
+
     if mode == "context":
         previous, current = text
         system = (
@@ -122,6 +215,10 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
 Produce a natural, idiomatic {target_lang} caption for <previous>, updating it only if <current> clarifies meaning.
 </task>
 
+<recent_target>
+{recent_target_str}
+</recent_target>
+
 <rules>
 - Output: ONLY the improved translation of <previous>. No quotes, no commentary.
 - Make phrasing natural in {target_lang} (not literal), but add no new information.
@@ -129,7 +226,8 @@ Produce a natural, idiomatic {target_lang} caption for <previous>, updating it o
 - Resolve pronouns, names, tense, or ellipsis only if <current> makes them clear.
 - Remove filler like uh/um/えっと/あの unless meaningful.
 - Keep numbers as digits and preserve proper nouns/terminology.
-- Do not repeat the same phrase in the output.
+- Avoid repeating sentences or phrases already present in <recent_target> unless they add new factual content.
+- Keep edits minimal to avoid visual jumpiness.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
 
@@ -146,14 +244,19 @@ Produce a natural, idiomatic {target_lang} caption for <previous>, updating it o
 Translate a short, possibly incomplete ASR segment from {source_lang} to {target_lang} for live captions. Aim for natural, idiomatic speech.
 </task>
 
+<recent_target>
+{recent_target_str}
+</recent_target>
+
 <rules>
 - Natural over literal: use target-language word order and phrasing; keep meaning faithful.
 - Mirror completeness: if the source is a fragment, keep a natural fragment; do not guess the rest.
 - Remove pure filled pauses (uh/um/えっと/あの) unless they carry meaning.
 - Keep numbers as digits; preserve names, technical terms, and units.
-- Do not add greetings/sign-offs/explanations or YouTube-style CTAs.
+- Do not add greetings/sign-offs/explanations or CTAs unless in source.
+- Avoid repeating sentences or phrases already present in <recent_target> unless they add new factual content.
+- If repetition occurs, merge into one concise, natural sentence.
 - If input is already in {target_lang}, return it unchanged.
-- Do not repeat the same phrase in the output.
 - Register: for Japanese use {"です・ます" if target_register=="polite" else "casual speech"}; for English use {target_register} spoken style.
 </rules>
 
@@ -170,7 +273,12 @@ Translate a short, possibly incomplete ASR segment from {source_lang} to {target
             reasoning_effort="minimal",
             verbosity="low"
         )
-        return (response.choices[0].message.content or "").strip()
+        raw = (response.choices[0].message.content or "").strip()
+        # Default path: fuzzy de-dupe; context path: exact-only de-dupe
+        if mode == "context":
+            return collapse_repetition(raw, fuzzy=False)
+        else:
+            return collapse_repetition(raw, fuzzy=True)
     except Exception as e:
         print("❌ Translation error:", e)
         return text
@@ -228,7 +336,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=1,
+                        # beam_size omitted (greedy implied with temperature=0.0)
                         condition_on_previous_text=True,
                         hallucination_silence_threshold=0.2,
                         no_speech_threshold=0.3,
@@ -242,7 +350,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not text:
                         continue
 
-                    # ---------- Original thank-you filter (drop any segment containing these) ----------
+                    # ---------- Keep thank-you filter ----------
                     text_lower = text.lower()
                     if (
                         "thank you" in text_lower
@@ -253,9 +361,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     ):
                         print("🚫 Skipping thank-you/ありがとう phrase:", text)
                         continue
-                    # -----------------------------------------------------------------------------------
+                    # ------------------------------------------
 
-                    # GPT-based hallucination filter (keeps normal conversational turns)
+                    # GPT-based hallucination filter
                     try:
                         if await hallucination_check(text):
                             print("🧠 GPT flagged as broadcast/CTA filler:", text)
@@ -266,14 +374,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     # assign ID and translate
                     segment_id = str(uuid.uuid4())
                     transcript_history.append((segment_id, text))
+                    if len(transcript_history) > MAX_TRANSCRIPTS:
+                        transcript_history.pop(0)
 
                     translated = await translate_text(text, source_lang, target_lang)
                     await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
+
+                    # store in recent target history (only [DONE] outputs to avoid feedback loops)
+                    recent_targets.append(translated)
+                    if len(recent_targets) > MAX_RECENT:
+                        recent_targets.pop(0)
 
                     # update previous translation using new context
                     if len(transcript_history) >= 2:
                         prev, curr = transcript_history[-2][1], transcript_history[-1][1]
                         improved = await translate_text((prev, curr), source_lang, target_lang, mode="context")
+                        # no extra de-dupe here; translate_text(context) already did exact-only
                         await websocket.send_text(f"[UPDATE]{json.dumps({'id': transcript_history[-2][0], 'text': improved})}")
 
     except Exception as e:
