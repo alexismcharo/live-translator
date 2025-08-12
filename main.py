@@ -193,8 +193,7 @@ async def translate_text(text, source_lang, target_lang, mode="default"):
         # text = (previous, current)
         previous, current = text
         system = (
-            "You are polishing live captions to sound idiomatic and natural in the target language. "
-            "Your job: improve the PREVIOUS line using CURRENT as context, then output ONLY the improved previous."
+            "You are polishing live captions to sound idiomatic and natural in the target language. Improve the PREVIOUS line using CURRENT as context, then output ONLY the improved previous line (a single line of target-language text)."
         )
         user = f"""
 <goal>
@@ -202,65 +201,42 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 </goal>
 
 <completion_policy>
-- Merge <previous> and <current> only if <current> clearly completes or clarifies <previous>.
-- If any phrase of 4+ consecutive words (or 6+ characters in Japanese) appears in both <previous> and <current>,
-  keep only the clearest, most complete occurrence.
-- If <previous> and <current> both describe the same subject and action (same core meaning),
-  keep only one phrasing — prefer the more complete or fluent version.
-- Remove repeated location/date/time phrases unless each occurrence adds different information.
+- Merge only if <current> clearly completes or clarifies <previous>; otherwise keep <previous> as a natural fragment.
+- If a non–named-entity phrase of 5+ consecutive words (or 10+ Japanese characters) appears in both <previous> and <current>, keep the clearest single occurrence. Do not remove named entities or titles unless they are literally duplicated back-to-back.
+- If both lines express the same subject + action, keep only one phrasing (prefer the more complete or fluent).
+- Remove repeated time/place phrases unless each adds new information.
 - Compress clause restarts and self-corrections without changing meaning.
-- Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) with no meaning.
-- Do not add information not present in either <previous> or <current>.
-- Preserve mood/person from source; do NOT change first-person to imperative.
+- Keep stance words (e.g., “actually”, “maybe”) but drop pure fillers (uh/um/えっと) with no meaning.
+- Preserve mood/person from the source (do not turn first-person statements into imperatives).
+- Suppress any output identical to or a near-duplicate of a line in <recent_target> unless it adds clearly new, substantive information.
 </completion_policy>
-
 
 <priorities>
 1) Faithful meaning > natural flow > brevity.
-2) Prefer common collocations and natural phrasing over literal word order.
-3) Eliminate exact or near-duplicate clauses within the merged line, even if wording differs slightly.
-4) Suppress any output that is identical to or a near-duplicate of a line already in <recent_target>, 
-   unless the new version adds clearly new, substantive information or significantly improves clarity.
-5) Preserve fragment type: heading stays heading; spoken clause becomes smooth spoken language.
+2) Eliminate exact or near-duplicate clauses within the merged line, even if wording differs slightly.
+3) Preserve fragment type: headings/labels stay non-sentential; spoken clauses become smooth spoken language.
 </priorities>
-
 
 <examples_positive>
 <previous>My name is</previous>
 <current>name is Alexis.</current>
 <output>My name is Alexis.</output>
 
-<previous>My name is Alexis.</previous>
-<current>My name is Alexis.</current>
-<output>My name is Alexis.</output> <!-- deduped -->
-
-<previous>Uh, I think we should</previous>
-<current>we should probably call them now.</current>
-<output>I think we should probably call them now.</output>
-
-<previous>Translation when there’s</previous>
-<current>fragments involved.</current>
-<output>Translation when there are fragments involved</output>
+<previous>They arrived late because</previous>
+<current>because the train was delayed.</current>
+<output>They arrived late because the train was delayed.</output>
 
 <previous>The driver of Justice Minister Levin</previous>
 <current>Justice Minister Levin's driver changed the locks.</current>
 <output>Justice Minister Levin's driver changed the locks.</output>
 
-<previous>He said the decision was</previous>
-<current>the decision was final.</current>
-<output>He said the decision was final.</output>
-
 <previous>The meeting will take place</previous>
 <current>take place next Tuesday at 3 p.m.</current>
 <output>The meeting will take place next Tuesday at 3 p.m.</output>
 
-<previous>Fire breaks out in central market</previous>
-<current>central market blaze under control.</current>
-<output>Fire breaks out in central market — blaze under control.</output> <!-- keeps headline style -->
-
-<previous>We decided to go ahead</previous>
-<current>go ahead with the plan.</current>
-<output>We decided to go ahead with the plan.</output>
+<previous>Translation when there’s</previous>
+<current>fragments involved.</current>
+<output>Translation when there are fragments involved</output>
 
 <previous>Officials warned that</previous>
 <current>warned that the storm could worsen overnight.</current>
@@ -276,25 +252,17 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 <current>because the train was delayed.</current>
 <output>They arrived late because because the train was delayed.</output> <!-- WRONG -->
 
-<previous>My name is Alexis.</previous>
-<current>My name is Alexis.</current>
-<output>My name is Alexis. My name is Alexis.</output> <!-- WRONG -->
-
 <previous>The driver of Justice Minister Levin</previous>
 <current>Justice Minister Levin's driver changed the locks.</current>
 <output>The driver of Justice Minister Levin Justice Minister Levin's driver changed the locks.</output> <!-- WRONG -->
 
-<previous>The meeting will take place</previous>
-<current>take place next Tuesday at 3 p.m.</current>
-<output>The meeting will take place take place next Tuesday at 3 p.m.</output> <!-- WRONG -->
+<previous>Meeting Agenda</previous>
+<current>for Thursday</current>
+<output>This is the meeting agenda for Thursday.</output> <!-- WRONG: narrativized heading -->
 
-<previous>We decided to go ahead</previous>
-<current>go ahead with the plan.</current>
-<output>We decided to go ahead go ahead with the plan.</output> <!-- WRONG -->
-
-<previous>Fire breaks out in central market</previous>
-<current>central market blaze under control.</current>
-<output>Fire breaks out in central market. Central market blaze under control.</output> <!-- WRONG for caption/headline style -->
+<previous>On Tuesday, without notice</previous>
+<current>on Tuesday, without notice, he appeared at the office.</current>
+<output>On Tuesday, without notice, on Tuesday, without notice, he appeared at the office.</output> <!-- WRONG: time duplicated -->
 </examples_negative>
 
 <recent_target>
@@ -311,8 +279,7 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 """.strip()
     else:
         system = (
-            "Translate live ASR segments into natural, idiomatic target-language captions. "
-            "Return ONLY the translation text."
+            "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
         )
         user = f"""
 <goal>
@@ -321,19 +288,20 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 
 <priorities>
 1) Preserve meaning faithfully; do not invent content.
-2) Prefer natural phrasing over literal order when safe.
+2) Prefer natural phrasing over literal word order when safe.
 3) Mirror completeness: if input is a fragment, output a natural fragment.
 4) Keep numbers as digits; preserve names and units verbatim.
-5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone.
-6) If a phrase repeats with no new info — including exact or near-duplicate wording from ASR overlap/restarts — keep it only once in its clearest form.
+5) Remove pure fillers (uh/um/えっと) unless they convey hesitation or tone.
+6) If a phrase repeats with no new info — including overlap/restarts — keep it only once; for non–named-entity phrases ≥5 words (JP ≥10 chars), keep the clearest single occurrence. Do not remove named entities or titles unless literally duplicated back-to-back.
 7) If the input is already {target_lang}, return it unchanged.
 8) If the input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
-9) Preserve mood/person; do NOT convert 1st-person statements into imperatives.
+9) Preserve mood/person; do not convert first-person statements into imperatives.
+10) Suppress any output identical to or a near-duplicate of a line in <recent_target> unless it adds clearly new, substantive information.
 </priorities>
 
 <language_tips>
-- Japanese: prefer everyday collocations; use 「〜できる」 over stiff 「〜することができる」; drop unnecessary subjects; pick particles for smoothness; avoid calques.
-- English: use contractions and common collocations; avoid source-language punctuation/order when awkward.
+- Japanese: prefer everyday collocations; avoid calques; drop unnecessary subjects; choose particles for smoothness.
+- English: use common collocations and contractions; avoid source-like punctuation/order when awkward.
 </language_tips>
 
 <style_targets>
@@ -341,6 +309,27 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 - Punctuation: minimal but natural for captions.
 </style_targets>
 
+<examples_positive>
+<input>I want to … check whether it actually improves the translation quality.</input>
+<output>I want to check whether it actually improves the translation quality.</output>
+
+<input>Meeting Agenda — Thursday</input>
+<output>Meeting Agenda — Thursday</output>
+
+<input>They arrived late because because the train was delayed.</input>
+<output>They arrived late because the train was delayed.</output>
+</examples_positive>
+
+<examples_negative>
+<input>My name is Alexis. My name is Alexis.</input>
+<output>My name is Alexis. My name is Alexis.</output> <!-- WRONG -->
+
+<input>The meeting will take place take place next Tuesday.</input>
+<output>The meeting will take place take place next Tuesday.</output> <!-- WRONG -->
+
+<input>On Tuesday, without notice, on Tuesday, without notice, he appeared.</input>
+<output>On Tuesday, without notice, on Tuesday, without notice, he appeared.</output> <!-- WRONG -->
+</examples_negative>
 
 <recent_target>
 {recent_target_str}
@@ -352,16 +341,29 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
 """.strip()
 
     try:
-        response = await client.chat.completions.create(
+        # Common params
+        kwargs = dict(
             model="gpt-5",
             messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
+                    {"role": "user", "content": user}],
             reasoning_effort="minimal",
-            verbosity="low"
+            top_p=1.0,               # keep full nucleus; steer with temperature
+            presence_penalty=0.0,
+            max_tokens=160           # modest cap for captions
         )
+
+        if mode == "context":
+            # steadier, stronger anti-repeat during merges
+            kwargs.update(temperature=0.1, frequency_penalty=0.2)
+        else:
+            # default per-chunk translate
+            kwargs.update(temperature=0.2, frequency_penalty=0.1)
+
+        response = await client.chat.completions.create(**kwargs)
         raw = (response.choices[0].message.content or "").strip()
         out = raw if mode == "context" else dedupe_repeated_ngrams(raw, n=3)
         return out
+
     except Exception as e:
         print("Translation error:", e)
         return text
