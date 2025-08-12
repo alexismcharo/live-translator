@@ -207,6 +207,8 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 - Remove exact or near-duplicate wording that appears in both <previous> and <current> (ASR overlap). Keep the clearest version once in the best position.
 - Compress clause restarts and self-corrections without changing meaning.
 - Keep stance words (actually, maybe) but drop pure fillers (uh/um/えっと) with no meaning.
+- If two adjacent clauses/sentences assert the same fact (e.g., “My name is Alexis.” repeated),
+  keep it once.
 </completion_policy>
 
 <priorities>
@@ -228,19 +230,82 @@ Return ONE natural {target_lang} line for <previous>. Use <current> only to clar
 - Explanations, notes, quotes, brackets. Output text only.
 </forbidden>
 
-<examples>
-<previous>I want to</previous>
-<current>check whether it actually improves the translation quality.</current>
-<output>I want to check whether it actually improves the translation quality.</output>
+<positive_examples>
+<previous>He said the problem was</previous>
+<current>the problem was caused by a software bug.</current>
+<output>He said the problem was caused by a software bug.</output>
 
-<previous>Translation when there’s</previous>
-<current>fragments involved.</current>
-<output>Translation when there are fragments involved</output>  <!-- heading preserved -->
+<previous>My name is</previous>
+<current>name is Alexis.</current>
+<output>My name is Alexis.</output>
 
-<previous>…prohibiting Levin from interfering</previous>
-<current>…prohibiting Levin from interfering with Baharav-Miara’s duties.</current>
-<output>…prohibiting Levin from interfering with Baharav-Miara’s duties.</output>  <!-- deduped -->
-</examples>
+<previous>Uh, I think we should</previous>
+<current>we should probably call them now.</current>
+<output>I think we should probably call them now.</output>
+
+<previous>They arrived late because</previous>
+<current>because the train was delayed.</current>
+<output>They arrived late because the train was delayed.</output>
+
+<previous>Meeting Agenda</previous>
+<current>for Thursday</current>
+<output>Meeting Agenda for Thursday</output>
+
+<previous>The minister said that</previous>
+<current>the minister said that this policy would be reviewed.</current>
+<output>The minister said that this policy would be reviewed.</output>
+
+<previous>He plans to visit Paris</previous>
+<current>visit Paris next summer.</current>
+<output>He plans to visit Paris next summer.</output>
+
+<previous>We need to buy more supplies</previous>
+<current>more supplies for the trip.</current>
+<output>We need to buy more supplies for the trip.</output>
+
+<previous>She told me</previous>
+<current>she told me to be careful.</current>
+<output>She told me to be careful.</output>
+</positive_examples>
+
+<negative_examples>
+<previous>He said the problem was</previous>
+<current>the problem was caused by a software bug.</current>
+<output>He said the problem was the problem was caused by a software bug.</output>  <!-- WRONG -->
+
+<previous>My name is</previous>
+<current>name is Alexis.</current>
+<output>My name is Alexis. My name is Alexis.</output>  <!-- WRONG -->
+
+<previous>Uh, I think we should</previous>
+<current>we should probably call them now.</current>
+<output>Uh, I think we should probably call them now.</output>  <!-- WRONG -->
+
+<previous>They arrived late because</previous>
+<current>because the train was delayed.</current>
+<output>They arrived late because because the train was delayed.</output>  <!-- WRONG -->
+
+<previous>Meeting Agenda</previous>
+<current>for Thursday</current>
+<output>This is the meeting agenda for Thursday.</output>  <!-- WRONG -->
+
+<previous>The minister said that</previous>
+<current>the minister said that this policy would be reviewed.</current>
+<output>The minister said that. The minister said that this policy would be reviewed.</output>  <!-- WRONG -->
+
+<previous>He plans to visit Paris</previous>
+<current>visit Paris next summer.</current>
+<output>He plans to visit Paris visit Paris next summer.</output>  <!-- WRONG -->
+
+<previous>We need to buy more supplies</previous>
+<current>more supplies for the trip.</current>
+<output>We need to buy more supplies more supplies for the trip.</output>  <!-- WRONG -->
+
+<previous>She told me</previous>
+<current>she told me to be careful.</current>
+<output>She told me she told me to be careful.</output>  <!-- WRONG -->
+</negative_examples>
+
 
 <merge_test>
 Merge only if replacing <previous> with the result does not lose meaning and does not introduce repeated clauses.
