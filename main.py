@@ -95,6 +95,7 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 7) If input is already {target_lang}, return it unchanged.
 8) If input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
 9) Preserve mood/person; do not convert first-person statements into imperatives.
+10) Preserve names as heard; do not invent or ‘correct’ them. If unsure, leave as-is without adding titles.
 </priorities>
 
 <style_targets>
@@ -177,7 +178,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
                     try:
                         subprocess.run(
-                            ["ffmpeg", "-y", "-i", raw.name, "-af", "silenceremove=1:0:-40dB", "-ar", "16000", "-ac", "1", wav.name],
+                            ["ffmpeg", "-y", "-i", raw.name, "-af", "silenceremove=1:0:-35dB", "-ar", "16000", "-ac", "1", wav.name],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True
                         )
                     except:
@@ -187,7 +188,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        condition_on_previous_text=True,
+                        condition_on_previous_text=False,
                         hallucination_silence_threshold=0.3,
                         no_speech_threshold=0.3,
                         language="en" if source_lang == "English" else "ja",
