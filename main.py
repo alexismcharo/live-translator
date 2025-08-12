@@ -24,20 +24,42 @@ def safe_output_text(resp) -> str:
     """
     Robustly extract text from a Responses API object.
     Falls back to walking resp.output[...] if output_text is missing.
+    Handles several possible SDK shapes.
     """
+    # 1) Newer helper property
     txt = getattr(resp, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt.strip()
 
+    # 2) Structured output fallback
     out = []
     output = getattr(resp, "output", []) or []
     for item in output:
+        # Some SDKs put direct 'text' on the item
+        it_text = getattr(item, "text", None)
+        if isinstance(it_text, str) and it_text:
+            out.append(it_text)
+
+        # Common: item.content is a list of chunks with .text or .input_text
         content = getattr(item, "content", []) or []
         for c in content:
-            t = getattr(c, "text", None) or getattr(c, "input_text", None)
-            if isinstance(t, str):
+            t = (
+                getattr(c, "text", None)
+                or getattr(c, "input_text", None)
+            )
+            if isinstance(t, str) and t:
                 out.append(t)
-    return "".join(out).strip()
+
+    if out:
+        return "".join(out).strip()
+
+    # 3) Ultra-conservative: try common fields directly on resp
+    for attr in ("message", "content", "text"):
+        val = getattr(resp, attr, None)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+
+    return ""
 
 # ------------- Warm FFMPEG & Whisper --------------
 WARMUP_WAV = "/tmp/warm.wav"
@@ -209,22 +231,42 @@ async def stream_translate(websocket: WebSocket, text: str, source_lang: str, ta
 
             async for event in stream:
                 et = getattr(event, "type", "")
-                if et == "response.output_text.delta":
-                    delta = getattr(event, "delta", "") or ""
-                    if not delta:
+
+                # Accept multiple delta event shapes from different SDKs
+                if et in ("response.output_text.delta", "response.delta", "message.delta"):
+                    delta = (
+                        getattr(event, "delta", None)
+                        or getattr(event, "text", None)
+                        or ""
+                    )
+                    if not isinstance(delta, str) or not delta:
                         continue
+
                     buf.append(delta)
                     s = "".join(buf)
                     now = time.monotonic()
                     if s.endswith(("。","、",".","!","?","！","？")) or (now - last) > 0.18 or len(s.split()) >= 8:
                         await websocket.send_text(f"[PARTIAL]{json.dumps({'text': s}, ensure_ascii=False)}")
                         last = now
-                # (optional) handle other event types as needed
+
+                # (Optional) handle tool/use events here if you add tools later.
 
             final_resp = await stream.get_final_response()
             final_text = "".join(buf).strip()
             if not final_text:
                 final_text = safe_output_text(final_resp)
+
+        # Last-ditch non-streaming fallback if still empty
+        if not final_text:
+            resp = await client.responses.create(
+                model="gpt-5",
+                input=[
+                    {"role":"system","content":system_prompt},
+                    {"role":"user","content":user_prompt}
+                ],
+                max_output_tokens=200
+            )
+            final_text = safe_output_text(resp)
 
         await websocket.send_text(f"[FINAL]{json.dumps({'text': final_text}, ensure_ascii=False)}")
         return final_text
