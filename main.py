@@ -164,6 +164,14 @@ def classify_relation(prev: str, curr: str):
         return "update"
     return "new"
 
+def meaningfully_different(prev: str, new: str, ratio_thresh: float = 0.94) -> bool:
+    """Heuristic: is 'new' meaningfully different/better than 'prev'."""
+    pa, na = _normalize_text_for_compare(prev), _normalize_text_for_compare(new)
+    if not na:
+        return False
+    r = difflib.SequenceMatcher(None, pa, na).ratio()
+    return (r < ratio_thresh) or (len(na) > len(pa) + 8)
+
 # ----------------------------------------------------------------------
 
 @app.get("/")
@@ -216,14 +224,14 @@ Segment:
 Answer with exactly YES or NO.
 """.strip()
 
-        result = await client.chat.completions.create(  
+        result = await client.chat.completions.create(
             model="gpt-5",
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user}
             ],
             reasoning_effort="minimal",
-            verbosity="low",
+            verbosity="low"
         )
         out = (result.choices[0].message.content or "").strip().upper()
         return out == "YES"
@@ -309,7 +317,7 @@ Aim for natural, idiomatic speech. If this segment largely repeats earlier trans
                 {"role": "user", "content": user}
             ],
             reasoning_effort="minimal",
-            verbosity="low",
+            verbosity="low"
         )
         raw = (response.choices[0].message.content or "").strip()
         if mode == "context":
@@ -331,6 +339,7 @@ async def websocket_endpoint(websocket: WebSocket):
     recent_targets = []       # last few translated outputs only
     last_emitted_id = None
     last_emitted_text = ""
+    last_source_text = ""     # source text that produced last_emitted_text
     processing = False
 
     try:
@@ -423,45 +432,63 @@ async def websocket_endpoint(websocket: WebSocket):
                 except Exception as e:
                     print("⚠️ Hallucination check failed open (passing segment):", e)
 
-                # Translate
-                translated = await translate_text(
-                    text, source_lang, target_lang, recent_targets=recent_targets, mode="default"
+                # --- 1) Try context refinement of the LAST emitted caption using current source ---
+                refined_prev = ""
+                if last_emitted_id is not None and last_source_text:
+                    refined_prev = await translate_text(
+                        (last_source_text, text),
+                        source_lang, target_lang,
+                        recent_targets=recent_targets,
+                        mode="context"
+                    )
+                    refined_prev = collapse_repetition(refined_prev, fuzzy=False)  # gentle on updates
+
+                # --- 2) Translate the CURRENT chunk normally ---
+                translated_now = await translate_text(
+                    text, source_lang, target_lang,
+                    recent_targets=recent_targets,
+                    mode="default"
                 )
 
                 # Allow empty output when nothing new
-                if not translated:
-                    continue
+                # (Note: refined_prev may still be non-empty even if translated_now is empty)
+                # First, decide if we should UPDATE the last line with the refined text.
+                if last_emitted_id is not None and refined_prev:
+                    if meaningfully_different(last_emitted_text, refined_prev):
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': refined_prev})}")
+                        # keep histories in sync
+                        if recent_targets:
+                            recent_targets[-1] = refined_prev
+                        else:
+                            recent_targets.append(refined_prev)
+                        last_emitted_text = refined_prev
+                        # Note: do NOT change last_source_text here
 
-                # Decide how to emit relative to last
-                action = classify_relation(last_emitted_text, translated)
+                # Next, decide how to handle the current translation relative to what we just showed.
+                if translated_now:
+                    action = classify_relation(last_emitted_text, translated_now)
+                    if action == "update" and last_emitted_id is not None:
+                        await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated_now})}")
+                        if recent_targets:
+                            recent_targets[-1] = translated_now
+                        else:
+                            recent_targets.append(translated_now)
+                        last_emitted_text = translated_now
+                        # last_source_text stays as is (the source that produced last_emitted_text)
+                    elif action == "new":
+                        segment_id = str(uuid.uuid4())
+                        transcript_history.append((segment_id, text))
+                        if len(transcript_history) > MAX_TRANSCRIPTS:
+                            transcript_history.pop(0)
 
-                if action == "drop":
-                    continue
-
-                elif action == "update" and last_emitted_id is not None:
-                    # refine the existing caption instead of adding a new one
-                    await websocket.send_text(f"[UPDATE]{json.dumps({'id': last_emitted_id, 'text': translated})}")
-                    # update last state and replace last recent target
-                    if recent_targets:
-                        recent_targets[-1] = translated
-                    else:
-                        recent_targets.append(translated)
-                    last_emitted_text = translated
-
-                else:  # "new"
-                    segment_id = str(uuid.uuid4())
-                    transcript_history.append((segment_id, text))
-                    if len(transcript_history) > MAX_TRANSCRIPTS:
-                        transcript_history.pop(0)
-
-                    await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated})}")
-                    # record as last emitted
-                    last_emitted_id = segment_id
-                    last_emitted_text = translated
-                    # push to recent_targets
-                    recent_targets.append(translated)
-                    if len(recent_targets) > MAX_RECENT:
-                        recent_targets.pop(0)
+                        await websocket.send_text(f"[DONE]{json.dumps({'id': segment_id, 'text': translated_now})}")
+                        last_emitted_id = segment_id
+                        last_emitted_text = translated_now
+                        last_source_text = text  # bind source that produced last emission
+                        recent_targets.append(translated_now)
+                        if len(recent_targets) > MAX_RECENT:
+                            recent_targets.pop(0)
+                    # if action == "drop": do nothing
 
             except Exception as e:
                 print("❌ WebSocket loop error:", e)
