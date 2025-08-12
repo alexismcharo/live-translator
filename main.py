@@ -347,17 +347,16 @@ Produce fluent, idiomatic {target_lang} captions for this single ASR segment.
             messages=[{"role": "system", "content": system},
                     {"role": "user", "content": user}],
             reasoning_effort="minimal",
-            top_p=1.0,               # keep full nucleus; steer with temperature
             presence_penalty=0.0,
             max_completion_tokens=160           # modest cap for captions
         )
 
         if mode == "context":
             # steadier, stronger anti-repeat during merges
-            kwargs.update(temperature=0.1, frequency_penalty=0.2)
+            kwargs.update(frequency_penalty=0.2)
         else:
             # default per-chunk translate
-            kwargs.update(temperature=0.2, frequency_penalty=0.1)
+            kwargs.update(frequency_penalty=0.1)
 
         response = await client.chat.completions.create(**kwargs)
         raw = (response.choices[0].message.content or "").strip()
