@@ -230,7 +230,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         no_speech_threshold=0.6,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.0,
-                        logprob_threshold=-1.0,
+                        logprob_threshold=-1.2,
                         initial_prompt=initial_prompt
                         
                     )
