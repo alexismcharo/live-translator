@@ -98,7 +98,7 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken. Do not add, exaggerate, or diminish meaning, tone, or style. Use context only to resolve ambiguous pronouns or incomplete words.
+Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken. Preserve original word strength, tone, and register without upgrading or downgrading. Use context only to resolve ambiguous pronouns or incomplete words.
 </goal>
 
 <context_use>
@@ -108,25 +108,27 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as s
 </context_use>
 
 <priorities>
-1) Exact meaning & tone — Translate only what is present in the source, preserving both content and the speaker’s actual tone as heard. If no emotion or attitude is explicit in the source words or delivery, do not imply one.
-2) Use natural, everyday {target_lang} phrasing for fluency only if it does not alter meaning, tone, or register.
-3) If the current input overlaps with <source_context> or <recent_target>, remove duplicated words but do not rephrase earlier material unless it is literally repeated here.
-4) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
-5) No added commentary, sarcasm, praise, criticism, or rhetorical framing unless present verbatim in the source.
-6) Only describe vocal events (e.g., “laughs,” “sighs”) if they are explicitly audible and part of the original audio. Do not invent them.
-7) If input is already {target_lang}, return it unchanged.
-8) Translate labels, titles, and meta comments as such; do not expand into full sentences.
-9) Preserve grammatical person and mood; do not change first-person statements into imperatives or alter register.
-11) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they provide brand/source/modifier information.
-12) Maintain one consistent spelling and form for each proper noun within the session.
+1) Exact meaning & tone (highest priority) — Translate only what is present in the source. Match intensity level precisely; do not make language stronger, weaker, or more colorful than the original.
+2) Lexical fidelity — Choose target-language terms whose strength and connotation most closely match the source words.
+3) When fluency conflicts with fidelity, fidelity takes precedence.
+4) If the current input overlaps with <source_context> or <recent_target>, remove duplicated words but do not rephrase earlier material unless it is literally repeated here.
+5) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
+6) No added commentary, sarcasm, praise, criticism, or rhetorical framing unless present verbatim in the source.
+7) Only describe vocal events if explicitly audible in the source. Do not invent them.
+8) If input is already {target_lang}, return it unchanged.
+9) Translate labels, titles, and meta comments as such; do not expand into full sentences.
+10) Preserve grammatical person and mood; do not change first-person statements into imperatives or alter register.
+11) Drop standalone low-content interjections unless they provide brand/source/modifier info.
+12) Maintain consistent spelling and form for each proper noun in the session.
 13) Redundancy filter: if the current line restates content already fully covered in <recent_target> with no new detail, output nothing.
 </priorities>
 
 
 
 <style_targets>
-- Tone: clear, concise, speech-like.
-- Preserve pacing and emphasis where possible without embellishment.
+- Tone: clear, concise.
+- Keep pacing and emphasis only if present in the source; no embellishment.
+- Natural speech-like phrasing is allowed only if it does not change meaning, tone, or word strength.
 </style_targets>
 
 <source_context>
