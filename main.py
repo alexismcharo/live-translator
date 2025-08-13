@@ -223,6 +223,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.2,
                         logprob_threshold=-1.0
+                        initial_prompt="Tech for Impact Summit 2025 (Tech4Impact, T4I) — “Beyond Boundaries: Building 2050 Together,” Oct 7, 2025 at Toranomon Hills Forum, Tokyo. "
+                        "Bilingual (English/Japanese) with AI interpretation. "
+                        "Topics include sustainability, social innovation, impact investing, SDGs, AI, blockchain/Web3 (RWA tokenization, governance), quantum computing, nuclear fusion, bioelectricity, brain–computer interfaces, DEI, democracy (plurality). "
+                        "Speakers include Charles Hoskinson, Audrey Tang, Michael Levin, Hector Zenil, Ken Shibusawa, Seira Yun, Ken Kodama, and more."
                     )
 
                     src_text = (result.get("text") or "").strip()
