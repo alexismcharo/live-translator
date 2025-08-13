@@ -163,7 +163,7 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 <priorities>
 1) Preserve meaning faithfully; do not add, remove, or infer details not in the source.
 2) Prefer idiomatic, natural phrasing over literal word order when it does not distort meaning.
-3) Mirror completeness: if input is a fragment, output a natural fragment (no guessing of endings) and omit a final full stop; internal commas/dashes may be used naturally.
+3) Mirror completeness with context: if the input alone is a fragment, but combining it with <source_context> (the immediately preceding ASR text) yields a clear, unambiguous complete sentence, output the completed sentence with natural punctuation. Otherwise keep a natural fragment and omit the final full stop; internal commas/dashes may still be used.
 4) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
 5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone important to meaning.
 6) Collapse overlap/restarts: keep repeated material only once if no new information is added.
@@ -268,13 +268,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=5,  
+                        beam_size=5,
+                        patience=1.2,  
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.50,
                         no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
-                        compression_ratio_threshold=2.4,
-                        logprob_threshold=-1.0
+                        compression_ratio_threshold=2.2,
+                        logprob_threshold=-0.7
                     )
 
                     src_text = (result.get("text") or "").strip()
