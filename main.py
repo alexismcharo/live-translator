@@ -32,6 +32,60 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
 )
 
+
+def _tok(s: str) -> list[str]:
+    # coarse EN/JA tokenization
+    return [t for t in re.findall(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+", s)]
+
+def suffix_overlap_action(prev_src: str,
+                          curr_src: str,
+                          min_match: int = 4,
+                          coverage: float = 0.8,
+                          max_window: int = 30):
+    """
+    If curr_src starts with a suffix of prev_src:
+      - if the matched suffix covers >= coverage of curr tokens -> ('skip', '')
+      - else -> ('trim', trimmed_curr)
+    Otherwise -> ('keep', curr_src)
+    """
+    if not prev_src or not curr_src:
+        return 'keep', curr_src
+
+    pw = _tok(prev_src)
+    cw = _tok(curr_src)
+    if not pw or not cw:
+        return 'keep', curr_src
+
+    # only look at a tail window to keep it cheap
+    tail = pw[-max_window:] if len(pw) > max_window else pw
+    # find longest k where tail[-k:] == cw[:k]
+    best = 0
+    for k in range(min(len(tail), len(cw)), min_match - 1, -1):
+        if tail[-k:] == cw[:k]:
+            best = k
+            break
+
+    if best < min_match:
+        return 'keep', curr_src
+
+    cov = best / max(1, len(cw))
+    if cov >= coverage:
+        return 'skip', ''
+    # trim best tokens from the start of curr_src
+    # (reconstruct by walking characters to the start of token #best)
+    count = 0
+    cut = 0
+    for m in re.finditer(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+|\s+|.", curr_src):
+        tok = m.group(0)
+        if re.fullmatch(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+", tok):
+            count += 1
+            if count == best:
+                cut = m.end()
+                break
+    while cut < len(curr_src) and curr_src[cut].isspace():
+        cut += 1
+    return 'trim', curr_src[cut:]
+
 # tiny context buffers for current-line translation only
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
@@ -200,6 +254,24 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not src_text:
                         continue
                     print("ASR:", src_text)
+
+                    # previous emitted source (if any)
+                    prev_src = recent_src_segments[-1] if recent_src_segments else ""
+
+                    action, adjusted = suffix_overlap_action(prev_src, src_text,
+                                                            min_match=4,      # >=4 tokens must match
+                                                            coverage=0.85,    # skip if >=85% of curr is overlap
+                                                            max_window=30)
+
+                    if action == 'skip':
+                        print("Skipped chunk (suffix repeat of previous).")
+                        continue
+                    elif action == 'trim':
+                        src_text = adjusted
+                        if not src_text:
+                            print("Trimmed to empty after overlap; skipping.")
+                            continue
+
 
                     if is_interjection_thanks(src_text):
                         print("Skipped short thank-you interjection (source).")
