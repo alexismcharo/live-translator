@@ -36,7 +36,7 @@ app.add_middleware(
 # tiny context buffers for current-line translation only
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
-MAX_SRC_CTX = 4
+MAX_SRC_CTX = 2
 MAX_RECENT = 6
 
 # exact short interjections only (and standalone "you")
@@ -98,19 +98,19 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using context only to disambiguate and avoid repetition.
+Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken. Use context only to resolve ambiguous pronouns or incomplete words. Avoid altering meaning, tense, or structure based on prior segments.
 </goal>
 
 <context_use>
-- Use <source_context> to resolve continuations or ambiguous references.
+- Refer to <source_context> only to resolve ambiguity in pronouns, ellipses, or cut-off words. Do not merge, rewrite, or restate the current input beyond what is necessary to produce a faithful translation of *this segment alone*.
 - Do not re-translate content already fully covered in <recent_target> unless the new input adds substantive information.
 - If the current input repeats a clause from <source_context>, keep it once in the cleanest form.
 </context_use>
 
 <priorities>
 1) Preserve meaning faithfully; do not add, remove, or infer details not in the source.
-2) Prefer idiomatic, natural phrasing over literal word order when it does not distort meaning.
-3) Mirror completeness with context: if the input alone is a fragment, but combining it with <source_context> (the immediately preceding ASR text) yields a clear, unambiguous complete sentence, output the completed sentence with natural punctuation. Otherwise keep a natural fragment and omit the final full stop; internal commas/dashes may still be used.
+2) Prefer everyday, speech-like expressions instead of overly formal or literal translations if they do not alter meaning.
+3) If the current input overlaps with <source_context> or <recent_target>, remove duplicated words but do not rephrase earlier material unless it is literally repeated here.
 4) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
 5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone important to meaning.
 6) Collapse overlap/restarts: keep repeated material only once if no new information is added.
