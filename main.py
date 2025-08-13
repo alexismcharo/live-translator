@@ -103,15 +103,19 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as s
 
 <context_use>
 - Refer to <source_context> only to resolve ambiguity in pronouns, ellipses, or cut-off words. Do not merge, rewrite, or restate the current input beyond what is necessary to produce a faithful translation of *this segment alone*.
+- Do not pull in synonyms, alternative wording, or extra clauses from <source_context> unless they are literally present in the current input.
 - Do not re-translate content already fully covered in <recent_target> unless the new input adds substantive information.
 - If the current input repeats a clause from <source_context>, keep it once in the cleanest form.
 </context_use>
 
 <priorities>
 1) Fidelity above all — Translate exactly what is said, preserving both meaning and *emotional strength* of each word or phrase. 
-2) No upgrades or downgrades in intensity — keep subjective strength identical. ("weak" ≠ "terrible", "minimal effort" ≠ "for free", "quite strong" ≠ "dominant").
+2) Preserve intensity markers and hedges exactly:
+   - No upgrades (“pretty weak” → “very weak”).
+   - No downgrades (“dominant” → “strong”).
+   - Keep uncertainty, informality, or hedging intact (“sort of”, “kinda”, “like”).
 3) No invented filler phrases, rhetorical asides, or emphasis markers unless explicitly present in the source audio or text.
-4) When choosing natural {target_lang} phrasing, do not change register or tone from the original.
+4) Maintain the same register (casual, formal, slang, technical) as in the source — do not shift formality up or down.
 5) If the current input overlaps with <source_context> or <recent_target>, remove duplicated words but do not rephrase earlier material unless it is literally repeated here.
 6) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
 7) Only describe vocal events if explicitly audible in the source. Do not invent them.
