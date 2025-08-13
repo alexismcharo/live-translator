@@ -150,7 +150,17 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 8) If input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
 9) Preserve mood/person; do not convert first-person statements into imperatives.
 10) Preserve names as heard; do not invent or ‘correct’ them. If unsure, leave as-is without adding titles.
+11) If the sentence seems incomplete, do not add an ending punctuation mark.
+
+12) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they add new information (source/brand/modifier).
+13) Keep one consistent form for each proper noun within the session; do not alternate variants (e.g., Levin ↔ Levine).
+14) When numbers pair with units or symbols, keep canonical formatting (e.g., 20%, 3km, ¥500; no extra spaces before %).
+15) Preserve quoted speech as quoted; do not invent speakers, and don’t convert quotes into narration.
+16) Prefer concise clause boundaries: split obvious run-ons; don’t split natural short clauses. (Captions should read cleanly.)
+17) If the current input merely restates content already covered in <recent_target> with no new detail, output nothing.
+18) Do not add honorifics/titles absent in the source (e.g., さん / Mr.); keep register neutral unless the source clearly marks it.
 </priorities>
+
 
 <style_targets>
 - Tone: clear, concise, speech-like.
@@ -194,7 +204,7 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print("Translation error:", e)
-        return text
+        return ""
 
 @app.get("/")
 async def serve_index():
@@ -255,24 +265,6 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     print("ASR:", src_text)
 
-                    # previous emitted source (if any)
-                    prev_src = recent_src_segments[-1] if recent_src_segments else ""
-
-                    action, adjusted = suffix_overlap_action(prev_src, src_text,
-                                                            min_match=4,      # >=4 tokens must match
-                                                            coverage=0.85,    # skip if >=85% of curr is overlap
-                                                            max_window=30)
-
-                    if action == 'skip':
-                        print("Skipped chunk (suffix repeat of previous).")
-                        continue
-                    elif action == 'trim':
-                        src_text = adjusted
-                        if not src_text:
-                            print("Trimmed to empty after overlap; skipping.")
-                            continue
-
-
                     if is_interjection_thanks(src_text):
                         print("Skipped short thank-you interjection (source).")
                         continue
@@ -288,6 +280,11 @@ async def websocket_endpoint(websocket: WebSocket):
                         continue
                     if is_cta_like(translated):
                         print("Dropped CTA/meta filler (target).")
+                        continue
+
+                    translated = translated.strip()
+                    if not translated or not re.search(r'[A-Za-z0-9ぁ-んァ-ン一-龯々ー]', translated):
+                        print("Suppressed empty/no-op output.")
                         continue
 
                     # update tiny context buffers only when emitting
