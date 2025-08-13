@@ -213,13 +213,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=4, 
+                        beam_size=2, 
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.50,
                         no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.2,
-                        logprob_threshold=-0.8
+                        logprob_threshold=-1.0
                     )
 
                     src_text = (result.get("text") or "").strip()
