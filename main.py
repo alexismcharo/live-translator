@@ -98,7 +98,7 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken. Use context only to resolve ambiguous pronouns or incomplete words. Avoid altering meaning, tense, or structure based on prior segments.
+Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken, with no additions, embellishments, or tone shifts. Use context only to resolve ambiguous pronouns or incomplete words. Do not infer meaning beyond what is explicitly stated.
 </goal>
 
 <context_use>
@@ -126,6 +126,7 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as s
 
 <style_targets>
 - Tone: clear, concise, speech-like.
+- Preserve pacing and emphasis where possible without embellishment.
 </style_targets>
 
 <source_context>
