@@ -37,7 +37,7 @@ app.add_middleware(
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
 MAX_SRC_CTX = 2
-MAX_RECENT = 6
+MAX_RECENT = 5
 
 # exact short interjections only (and standalone "you")
 THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
@@ -211,23 +211,27 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     except:
                         continue
+                    initial_prompt="Tech for Impact Summit 2025 (Tech4Impact, T4I) — “Beyond Boundaries: Building 2050 Together,” Oct 7, 2025 at Toranomon Hills Forum, Tokyo. "
+                    "Bilingual (English/Japanese) with AI interpretation. "
+                    "Topics include sustainability, social innovation, impact investing, SDGs, AI, blockchain/Web3 (RWA tokenization, governance), quantum computing, nuclear fusion, bioelectricity, brain–computer interfaces, DEI, democracy (plurality). "
+                    "Speakers include Charles Hoskinson, Audrey Tang, Michael Levin, Hector Zenil, Ken Shibusawa, Seira Yun, Ken Kodama, and more."
+                    first_chunk=True
 
                     result = model.transcribe(
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=2, 
+                        beam_size=4, 
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.50,
                         no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.2,
                         logprob_threshold=-1.0,
-                        initial_prompt="Tech for Impact Summit 2025 (Tech4Impact, T4I) — “Beyond Boundaries: Building 2050 Together,” Oct 7, 2025 at Toranomon Hills Forum, Tokyo. "
-                        "Bilingual (English/Japanese) with AI interpretation. "
-                        "Topics include sustainability, social innovation, impact investing, SDGs, AI, blockchain/Web3 (RWA tokenization, governance), quantum computing, nuclear fusion, bioelectricity, brain–computer interfaces, DEI, democracy (plurality). "
-                        "Speakers include Charles Hoskinson, Audrey Tang, Michael Levin, Hector Zenil, Ken Shibusawa, Seira Yun, Ken Kodama, and more."
+                        initial_prompt=initial_prompt if first_chunk else None
+                        
                     )
+                    first_chunk = False
 
                     src_text = (result.get("text") or "").strip()
                     if not src_text:
