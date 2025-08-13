@@ -90,7 +90,7 @@ def suffix_overlap_action(prev_src: str,
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
 MAX_SRC_CTX = 3
-MAX_RECENT = 10
+MAX_RECENT = 8
 
 # exact short interjections only (and standalone "you")
 THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
@@ -101,17 +101,38 @@ def is_interjection_thanks(text: str) -> bool:
         return False
     return bool(THANKS_RE.match(text.strip()))
 
-# CTA patterns (keep these as hard filters)
 _CTA_PATTERNS = [
-    r'(?i)\blike (?:and )?subscribe\b',
-    r'(?i)\bshare (?:this|the) (?:video|stream)\b',
-    r'(?i)\bhit (?:the )?bell\b',
-    r'(?i)\bturn on notifications?\b',
-    r'(?i)\blink in (?:the )?(?:bio|description)\b',
-    r'(?i)\bsee you (?:next time|in the next|tomorrow)\b',
-    r"(?i)\bthanks for watching\b",
-    r"(?i)\bthat's (?:it|all) for (?:today|now)\b",
-    r'(?i)\bsmash (?:that )?like\b',
+    # Like / subscribe combos
+    r'(?i)\blike\s*(?:and\s*)?subscribe\b',
+    r'(?i)\bsubscribe\s*(?:and\s*)?like\b',
+
+    # Share requests
+    r'(?i)\bshare\s+(?:this|the)\s+(?:video|stream|clip|content)\b',
+    r'(?i)\bplease\s+share\b',
+
+    # Notifications / bell
+    r'(?i)\bhit\s+(?:the\s+)?bell\b',
+    r'(?i)\bturn\s+on\s+notifications?\b',
+    r'(?i)\bdon\'?t\s+forget\s+to\s+turn\s+on\s+notifications?\b',
+
+    # Link references
+    r'(?i)\blink\s+in\s+(?:the\s+)?(?:bio|description)\b',
+    r'(?i)\bcheck\s+(?:the\s+)?link\s+(?:below|above)\b',
+
+    # Farewell / see you next time
+    r'(?i)\bsee\s+you\s+(?:next\s*time|tomorrow|soon|in\s+the\s+next)\b',
+
+    # Thanks for watching (all variants)
+    r'(?i)\bthanks?\s+for\s+watching\b',
+    r'(?i)\bthank\s+you\s+for\s+watching\b',
+    r'(?i)\bthank\s+you\s+so\s+much\s+for\s+watching\b',
+
+    # That's it / that's all
+    r'(?i)\bthat\'?s\s+(?:it|all)\s+for\s+(?:today|now)\b',
+    r'(?i)\bthat\'?s\s+(?:it|all)\b',
+
+    # Smash that like
+    r'(?i)\bsmash\s+(?:that\s+)?like\b',
 ]
 
 def is_cta_like(text: str) -> bool:
@@ -140,19 +161,19 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 </context_use>
 
 <priorities>
-1) Preserve meaning; do not add or remove information.
-2) Prefer idiomatic phrasing over literal order when safe.
-3) If input is a fragment, output a natural fragment and omit the final full stop; use internal commas/dashes if natural.
-4) Keep numbers as digits; preserve units and proper names exactly as heard.
-5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone.
-6) Collapse overlap/restarts: keep a repeated phrase only once if no new info.
+1) Preserve meaning faithfully; do not add, remove, or infer details not in the source.
+2) Prefer idiomatic, natural phrasing over literal word order when it does not distort meaning.
+3) Mirror completeness: if input is a fragment, output a natural fragment (no guessing of endings) and omit a final full stop; internal commas/dashes may be used naturally.
+4) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
+5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone important to meaning.
+6) Collapse overlap/restarts: keep repeated material only once if no new information is added.
 7) If input is already {target_lang}, return it unchanged.
-8) Translate labels/titles/meta as such; do not expand into full sentences.
-9) Preserve grammatical person/mood; do not convert first-person into imperatives.
-10) If target is Japanese: output katakana + Latin in parentheses on first mention, katakana thereafter. If unsure of a name, do not “correct” it.
-11) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they add source/brand/modifier info.
-12) Maintain one consistent spelling per proper noun within the session.
-13) If the line restates content already fully covered in <recent_target> with no new detail, output nothing.
+8) Translate labels, titles, and meta comments as such; do not expand into full sentences.
+9) Preserve grammatical person and mood; do not change first-person statements into imperatives or alter register.
+10) For Japanese targets: on first mention of a non-Japanese proper name, output katakana + Latin script in parentheses; on later mentions, use only the katakana. If unsure of a name, keep it exactly as heard without “correcting” it.
+11) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they provide brand/source/modifier information.
+12) Maintain one consistent spelling and form for each proper noun within the session.
+13) Redundancy filter: if the current line restates content already fully covered in <recent_target> with no new detail, output nothing.
 </priorities>
 
 
