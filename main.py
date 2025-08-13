@@ -33,64 +33,11 @@ app.add_middleware(
 )
 
 
-def _tok(s: str) -> list[str]:
-    # coarse EN/JA tokenization
-    return [t for t in re.findall(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+", s)]
-
-def suffix_overlap_action(prev_src: str,
-                          curr_src: str,
-                          min_match: int = 4,
-                          coverage: float = 0.8,
-                          max_window: int = 30):
-    """
-    If curr_src starts with a suffix of prev_src:
-      - if the matched suffix covers >= coverage of curr tokens -> ('skip', '')
-      - else -> ('trim', trimmed_curr)
-    Otherwise -> ('keep', curr_src)
-    """
-    if not prev_src or not curr_src:
-        return 'keep', curr_src
-
-    pw = _tok(prev_src)
-    cw = _tok(curr_src)
-    if not pw or not cw:
-        return 'keep', curr_src
-
-    # only look at a tail window to keep it cheap
-    tail = pw[-max_window:] if len(pw) > max_window else pw
-    # find longest k where tail[-k:] == cw[:k]
-    best = 0
-    for k in range(min(len(tail), len(cw)), min_match - 1, -1):
-        if tail[-k:] == cw[:k]:
-            best = k
-            break
-
-    if best < min_match:
-        return 'keep', curr_src
-
-    cov = best / max(1, len(cw))
-    if cov >= coverage:
-        return 'skip', ''
-    # trim best tokens from the start of curr_src
-    # (reconstruct by walking characters to the start of token #best)
-    count = 0
-    cut = 0
-    for m in re.finditer(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+|\s+|.", curr_src):
-        tok = m.group(0)
-        if re.fullmatch(r"[A-Za-z0-9]+|[ぁ-んァ-ン一-龯々ー]+", tok):
-            count += 1
-            if count == best:
-                cut = m.end()
-                break
-    while cut < len(curr_src) and curr_src[cut].isspace():
-        cut += 1
-    return 'trim', curr_src[cut:]
-
 # tiny context buffers for current-line translation only
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
-MAX_SRC_CTX = 3
-MAX_RECENT = 8
+MAX_SRC_CTX = 4
+MAX_RECENT = 6
 
 # exact short interjections only (and standalone "you")
 THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
@@ -170,7 +117,6 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 7) If input is already {target_lang}, return it unchanged.
 8) Translate labels, titles, and meta comments as such; do not expand into full sentences.
 9) Preserve grammatical person and mood; do not change first-person statements into imperatives or alter register.
-10) For Japanese targets: on first mention of a non-Japanese proper name, output katakana + Latin script in parentheses; on later mentions, use only the katakana. If unsure of a name, keep it exactly as heard without “correcting” it.
 11) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they provide brand/source/modifier information.
 12) Maintain one consistent spelling and form for each proper noun within the session.
 13) Redundancy filter: if the current line restates content already fully covered in <recent_target> with no new detail, output nothing.
@@ -180,7 +126,6 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 
 <style_targets>
 - Tone: clear, concise, speech-like.
-- Punctuation: minimal but natural for captions.
 </style_targets>
 
 <source_context>
@@ -258,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
                     try:
                         subprocess.run(
-                            ["ffmpeg", "-y", "-i", raw.name, "-af", "silenceremove=1:0:-30dB", "-ar", "16000", "-ac", "1", wav.name],
+                            ["ffmpeg", "-y", "-i", raw.name, "-af", "-ar", "16000", "-ac", "1", wav.name],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True
                         )
                     except:
@@ -268,14 +213,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=5,
-                        patience=1.2,  
+                        beam_size=4, 
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.50,
                         no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.2,
-                        logprob_threshold=-0.7
+                        logprob_threshold=-0.8
                     )
 
                     src_text = (result.get("text") or "").strip()
