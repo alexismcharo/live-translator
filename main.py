@@ -203,7 +203,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav:
                     try:
                         subprocess.run(
-                            ["ffmpeg", "-y", "-i", raw.name, "-af", "-ar", "16000", "-ac", "1", wav.name],
+                            ["ffmpeg", "-y", "-i", raw.name, "-ar", "16000", "-ac", "1", wav.name],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True
                         )
                     except:
