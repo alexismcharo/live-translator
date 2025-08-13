@@ -80,7 +80,15 @@ _CTA_PATTERNS = [
 
     # Smash that like
     r'(?i)\bsmash\s+(?:that\s+)?like\b',
+
+    # Subtitle / caption credits
+    r'(?i)\bsubtitles?\s+by\b',
+    r'(?i)\bcaptions?\s+by\b',
+    r'(?i)\bsubtitled\s+by\b',
+    r'(?i)\bclosed\s+captions?\s+by\b',
+    r'(?i)\bamara\.org\b',
 ]
+
 
 def is_cta_like(text: str) -> bool:
     if not text or len(text.strip()) < 2:
@@ -211,24 +219,19 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     except:
                         continue
-                    initial_prompt="Tech for Impact Summit 2025 (Tech4Impact, T4I) — “Beyond Boundaries: Building 2050 Together,” Oct 7, 2025 at Toranomon Hills Forum, Tokyo. "
-                    "Bilingual (English/Japanese) with AI interpretation. "
-                    "Topics include sustainability, social innovation, impact investing, SDGs, AI, blockchain/Web3 (RWA tokenization, governance), quantum computing, nuclear fusion, bioelectricity, brain–computer interfaces, DEI, democracy (plurality). "
-                    "Speakers include Charles Hoskinson, Audrey Tang, Michael Levin, Hector Zenil, Ken Shibusawa, Seira Yun, Ken Kodama, and more."
-                    first_chunk=True
-
+                    initial_prompt="Tech for Impact Summit 2025, Seira Yun, Charles Hoskinson, Audrey Tang"
                     result = model.transcribe(
                         wav.name,
                         fp16=True,
                         temperature=0.0,
                         beam_size=4, 
-                        condition_on_previous_text=False,
-                        hallucination_silence_threshold=0.50,
+                        condition_on_previous_text=True,
+                        hallucination_silence_threshold=0.30,
                         no_speech_threshold=0.4,
                         language="en" if source_lang == "English" else "ja",
-                        compression_ratio_threshold=2.2,
+                        compression_ratio_threshold=2.0,
                         logprob_threshold=-1.0,
-                        initial_prompt=initial_prompt if first_chunk else None
+                        initial_prompt=initial_prompt
                         
                     )
                     first_chunk = False
