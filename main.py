@@ -140,26 +140,21 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment, using conte
 </context_use>
 
 <priorities>
-1) Preserve meaning faithfully; do not invent content.
-2) Prefer natural phrasing over literal word order when safe.
-3) Mirror completeness: if input is a fragment, output a natural fragment (do not guess endings).
-4) Keep numbers as digits; preserve names and units verbatim.
+1) Preserve meaning; do not add or remove information.
+2) Prefer idiomatic phrasing over literal order when safe.
+3) If input is a fragment, output a natural fragment and omit the final full stop; use internal commas/dashes if natural.
+4) Keep numbers as digits; preserve units and proper names exactly as heard.
 5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone.
-6) If a phrase repeats with no new info (including overlap/restarts), keep it only once.
+6) Collapse overlap/restarts: keep a repeated phrase only once if no new info.
 7) If input is already {target_lang}, return it unchanged.
-8) If input is a label/title/heading/meta comment, translate it as such without turning it into a full sentence.
-9) Preserve mood/person; do not convert first-person statements into imperatives.
-10) Preserve names as heard; do not invent or ‘correct’ them. If unsure, leave as-is without adding titles.
-11) If the sentence seems incomplete, do not add an ending punctuation mark.
-
-12) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they add new information (source/brand/modifier).
-13) Keep one consistent form for each proper noun within the session; do not alternate variants (e.g., Levin ↔ Levine).
-14) When numbers pair with units or symbols, keep canonical formatting (e.g., 20%, 3km, ¥500; no extra spaces before %).
-15) Preserve quoted speech as quoted; do not invent speakers, and don’t convert quotes into narration.
-16) Prefer concise clause boundaries: split obvious run-ons; don’t split natural short clauses. (Captions should read cleanly.)
-17) If the current input merely restates content already covered in <recent_target> with no new detail, output nothing.
-18) Do not add honorifics/titles absent in the source (e.g., さん / Mr.); keep register neutral unless the source clearly marks it.
+8) Translate labels/titles/meta as such; do not expand into full sentences.
+9) Preserve grammatical person/mood; do not convert first-person into imperatives.
+10) If target is Japanese: output katakana + Latin in parentheses on first mention, katakana thereafter. If unsure of a name, do not “correct” it.
+11) Drop standalone low-content interjections (e.g., “newspaper.” / “article.” / “video.”) unless they add source/brand/modifier info.
+12) Maintain one consistent spelling per proper noun within the session.
+13) If the line restates content already fully covered in <recent_target> with no new detail, output nothing.
 </priorities>
+
 
 
 <style_targets>
