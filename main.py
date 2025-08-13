@@ -98,7 +98,7 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
     system = "Translate live ASR segments into natural, idiomatic target-language captions. Return ONLY the translation text."
     user = f"""
 <goal>
-Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken, with no additions, embellishments, or tone shifts. Use context only to resolve ambiguous pronouns or incomplete words. Do not infer meaning beyond what is explicitly stated.
+Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as spoken. Do not add, exaggerate, or diminish meaning, tone, or style. Use context only to resolve ambiguous pronouns or incomplete words.
 </goal>
 
 <context_use>
@@ -108,12 +108,12 @@ Produce fluent, idiomatic {target_lang} for THIS single ASR segment exactly as s
 </context_use>
 
 <priorities>
-1) Preserve meaning faithfully; do not add, remove, or infer details not in the source.
-2) Prefer everyday, speech-like expressions instead of overly formal or literal translations if they do not alter meaning.
+1) Exact meaning & tone — Translate only what is present in the source, preserving both content and the speaker’s actual tone as heard. If no emotion or attitude is explicit in the source words or delivery, do not imply one.
+2) Use natural, everyday {target_lang} phrasing for fluency only if it does not alter meaning, tone, or register.
 3) If the current input overlaps with <source_context> or <recent_target>, remove duplicated words but do not rephrase earlier material unless it is literally repeated here.
 4) Keep numbers as digits; preserve units, symbols, and proper names exactly as heard.
-5) Remove pure fillers (uh/um/えっと) unless they convey hesitation/tone important to meaning.
-6) Collapse overlap/restarts: keep repeated material only once if no new information is added.
+5) No added commentary, sarcasm, praise, criticism, or rhetorical framing unless present verbatim in the source.
+6) Only describe vocal events (e.g., “laughs,” “sighs”) if they are explicitly audible and part of the original audio. Do not invent them.
 7) If input is already {target_lang}, return it unchanged.
 8) Translate labels, titles, and meta comments as such; do not expand into full sentences.
 9) Preserve grammatical person and mood; do not change first-person statements into imperatives or alter register.
