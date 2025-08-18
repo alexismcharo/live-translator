@@ -222,8 +222,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         )
                     except:
                         continue
-                    initial_prompt="Tech for Impact Summit 2025, Seira Yun, Charles Hoskinson, Audrey Tang"
-                    first_chunk = True
+
                     result = model.transcribe(
                         wav.name,
                         fp16=True,
@@ -234,11 +233,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         no_speech_threshold=0.6,
                         language="en" if source_lang == "English" else "ja",
                         compression_ratio_threshold=2.0,
-                        logprob_threshold=-1.2,
-                        initial_prompt=initial_prompt if first_chunk else None
-                        
+                        logprob_threshold=-1.2,  
                     )
-                    first_chunk = False
 
                     src_text = (result.get("text") or "").strip()
                     if not src_text:
