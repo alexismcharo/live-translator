@@ -73,6 +73,8 @@ _CTA_PATTERNS = [
     r'(?i)\bthanks?\s+for\s+watching\b',
     r'(?i)\bthank\s+you\s+for\s+watching\b',
     r'(?i)\bthank\s+you\s+so\s+much\s+for\s+watching\b',
+    r"(?i)\bthank\s+you\s+y['’]?all\b",
+    r"(?i)\bthanks?\s+y['’]?all\b",
 
     # That's it / that's all
     r'(?i)\bthat\'?s\s+(?:it|all)\s+for\s+(?:today|now)\b',
@@ -87,6 +89,7 @@ _CTA_PATTERNS = [
     r'(?i)\bsubtitled\s+by\b',
     r'(?i)\bclosed\s+captions?\s+by\b',
     r'(?i)\bamara\.org\b',
+    r'(?i)\btranscription\s+by\b'
 ]
 
 
