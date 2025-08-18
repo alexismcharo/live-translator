@@ -227,7 +227,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=6, 
+                        beam_size=3, 
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.30,
                         no_speech_threshold=0.6,
