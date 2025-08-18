@@ -229,7 +229,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         fp16=True,
                         temperature=0.0,
                         beam_size=6, 
-                        condition_on_previous_text=True,
+                        condition_on_previous_text=False,
                         hallucination_silence_threshold=0.30,
                         no_speech_threshold=0.6,
                         language="en" if source_lang == "English" else "ja",
