@@ -37,7 +37,7 @@ app.add_middleware(
 recent_src_segments: list[str] = []
 recent_targets: list[str] = []
 MAX_SRC_CTX = 2
-MAX_RECENT = 5
+MAX_RECENT = 10
 
 # exact short interjections only (and standalone "you")
 THANKS_RE = re.compile(r'^\s*(?:thank\s*you|thanks|thx|you)\s*[!.…]*\s*$', re.IGNORECASE)
@@ -227,7 +227,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         wav.name,
                         fp16=True,
                         temperature=0.0,
-                        beam_size=3, 
+                        beam_size=6, 
                         condition_on_previous_text=False,
                         hallucination_silence_threshold=0.30,
                         no_speech_threshold=0.6,
